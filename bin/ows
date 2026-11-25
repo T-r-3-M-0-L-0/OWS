@@ -1,0 +1,256 @@
+#!/bin/sh
+set -eu
+umask 077
+
+LIB=/usr/lib/ows
+RUN=/tmp/ows
+STATE=/etc/ows
+QUEUE=$RUN/queue
+JOBS=$RUN/jobs
+PENDING=$STATE/pending
+
+fail() { printf '%s\n' "$*" >&2; exit 1; }
+prepare() { mkdir -p "$QUEUE" "$JOBS" "$STATE"; }
+
+publish() {
+    printf '{"job":"%s","phase":"%s","updated":%s}\n' "$1" "$2" "$(date +%s)" > "$JOBS/$1/status.new" &&
+        mv "$JOBS/$1/status.new" "$JOBS/$1/status.json" &&
+        printf '%s %s\n' "$(date +%s)" "$2" >> "$JOBS/$1/events" &&
+        cp "$JOBS/$1/status.json" "$RUN/latest.new" &&
+        mv "$RUN/latest.new" "$RUN/latest.json"
+}
+
+critical() {
+    printf '%s %s %s\n' "$(date +%s)" "$1" "$2" >> "$STATE/critical.log"
+    tail -n 100 "$STATE/critical.log" > "$STATE/critical.new"
+    mv "$STATE/critical.new" "$STATE/critical.log"
+}
+
+enqueue() (
+    kind=$1
+    shift
+    case "$kind" in
+        zapret2)
+            [ "$#" -ge 1 ] && [ "$#" -le 2 ] && [ -f "$1" ] || fail 'Usage: ows apply FILE'
+            revision=${2:-}
+            if [ -n "$revision" ]; then
+                case "$revision" in *[!a-f0-9]*) fail 'Invalid revision' ;; esac
+                [ "${#revision}" = 64 ] || fail 'Invalid revision'
+            fi
+            ;;
+        stgws)
+            . "$LIB/stgws.sh"
+            [ "$#" = 1 ] && stgws_action_allowed "$1" || fail 'Unknown sTGWS action'
+            ;;
+        zapret-module)
+            . "$LIB/zapret-module.sh"
+            . "$LIB/zapret-constructor.sh"
+            [ "$#" = 2 ] && zapret_module_action_allowed "$1" "$2" || fail 'Unknown Zapret action'
+            set -- "$1:$2"
+            ;;
+        *)
+            . "$LIB/vpn.sh"
+            ows_vpn_load "$kind" "$LIB" || fail 'Unknown VPN driver'
+            "${kind}_action_allowed" "${1:-}" || fail 'Unknown VPN action'
+            if [ "$1" = edit ]; then
+                [ "$#" = 2 ] && [ -f "$2" ] || fail 'Missing VPN edit'
+                payload=$2
+            else
+                [ "$#" = 1 ] || fail 'Unexpected VPN argument'
+            fi
+            ;;
+    esac
+    prepare
+    exec 8>"$RUN/submit.lock"
+    flock -x 8
+    set -- "$1" "$(date +%s)"
+    count=0
+    for ticket in "$QUEUE"/*; do
+        [ -f "$ticket" ] || break
+        count=$((count + 1))
+    done
+    [ "$count" -lt 16 ] || fail 'Queue is full'
+    serial=$(cat "$RUN/serial" 2>/dev/null || echo 0)
+    serial=$((serial + 1))
+    printf '%s\n' "$serial" > "$RUN/serial"
+    id=$(printf '%012d-%s' "$serial" "$2")
+    mkdir "$JOBS/$id"
+    printf '%s\n' "$kind" > "$JOBS/$id/kind"
+    if [ "$kind" = zapret2 ]; then
+        # Bound the queued input even if the supplied file grows during the read.
+        dd if="$1" of="$JOBS/$id/candidate" bs=1024 count=257 2>/dev/null
+        if [ "$(wc -c < "$JOBS/$id/candidate")" -gt 262144 ]; then
+            rm -f "$JOBS/$id/candidate"
+            fail 'Config exceeds 256 KiB'
+        fi
+        printf '%s\n' "$revision" > "$JOBS/$id/revision"
+    else
+        printf '%s\n' "$1" > "$JOBS/$id/action"
+        if [ -n "${payload:-}" ]; then
+            dd if="$payload" of="$JOBS/$id/payload" bs=1024 count=65 2>/dev/null
+            [ "$(wc -c < "$JOBS/$id/payload")" -le 65536 ] || {
+                rm -f "$JOBS/$id/payload"
+                fail 'Draft edit exceeds 64 KiB'
+            }
+        fi
+    fi
+    printf '{"job":"%s","phase":"queued","updated":%s}\n' "$id" "$2" > "$JOBS/$id/status.json"
+    printf '%s queued\n' "$2" > "$JOBS/$id/events"
+    : > "$QUEUE/$id"
+    printf '%s\n' "$id"
+)
+
+recover() {
+    [ -d "$PENDING" ] || return 0
+    id=$(cat "$PENDING/job")
+    if [ -f "$PENDING/committed" ]; then
+        if [ -d "$JOBS/$id" ]; then publish "$id" applied || return 1; fi
+        rm -rf "$PENDING"
+        return 0
+    fi
+    if restore_config "$PENDING"; then
+        if [ -d "$JOBS/$id" ]; then publish "$id" rolled_back || return 1; fi
+        rm -rf "$PENDING"
+    else
+        critical "$id" rollback_failed
+        if [ -d "$JOBS/$id" ]; then publish "$id" rollback_failed; fi
+        return 1
+    fi
+}
+
+process() {
+    id=$1
+    job=$JOBS/$id
+    publish "$id" validating || return 1
+    if ! config_current "$job"; then
+        publish "$id" config_changed
+        return
+    fi
+    if ! validate_config "$job"; then
+        publish "$id" invalid_config
+        return
+    fi
+    if ! save_snapshot "$job" "$id" "$PENDING"; then
+        if config_current "$job"; then publish "$id" snapshot_failed; else publish "$id" config_changed; fi
+        return
+    fi
+    publish "$id" applying || return 1
+    if apply_config "$PENDING"; then
+        : > "$PENDING/committed" || return 1
+        recover
+        return
+    fi
+    publish "$id" rolling_back || return 1
+    recover
+}
+
+process_module() {
+    local id=$1 kind=$2 result outcome action
+    publish "$id" applying || return 1
+    result=done
+    outcome=0
+    action=$(cat "$JOBS/$id/action") || return 1
+    (
+        export OWS_JOB_RESULT="$JOBS/$id/result.json"
+        case "$kind" in
+            stgws) stgws_execute "$action" ;;
+            zapret-module)
+                . "$LIB/zapret-module.sh"
+                . "$LIB/zapret-constructor.sh"
+                zapret_module_execute "$action"
+                ;;
+            *)
+                . "$LIB/vpn.sh"
+                ows_vpn_load "$kind" "$LIB" || exit 1
+                "${kind}_execute" "$action" "$JOBS/$id/payload"
+                ;;
+        esac
+    ) > "$JOBS/$id/output" 2>&1 9>&- || outcome=$?
+    case "$outcome" in
+        0) ;;
+        3) result=rollback_failed; critical "$id" rollback_failed ;;
+        *) result=operation_failed ;;
+    esac
+    publish "$id" "$result" || return 1
+    [ "$outcome" != 3 ]
+}
+
+worker() {
+    prepare
+    exec 9>"$RUN/worker.lock"
+    flock -n 9 || fail 'Worker already running'
+    # shellcheck source=../adapters/zapret2.sh
+    . "$LIB/zapret2.sh"
+    if [ -r "$LIB/stgws.sh" ]; then . "$LIB/stgws.sh"; fi
+    for dep in uci cmp pgrep; do command -v "$dep" >/dev/null || fail "Missing dependency: $dep"; done
+    recover || return 1
+    if [ -r "$LIB/vpn.sh" ]; then
+        ( . "$LIB/vpn.sh"; ows_vpn_recover "$LIB" ) || fail 'Pending VPN transaction needs recovery'
+    fi
+    while :; do
+        for ticket in "$QUEUE"/*; do
+            [ -f "$ticket" ] || break
+            id=${ticket##*/}
+            phase=$(cat "$JOBS/$id/status.json" 2>/dev/null || :)
+            case "$phase" in
+                *'"phase":"queued"'*)
+                    kind=$(cat "$JOBS/$id/kind" 2>/dev/null || :)
+                    case "$kind" in
+                        zapret2|'') process "$id" || return 1 ;;
+                        *) process_module "$id" "$kind" || return 1 ;;
+                    esac
+                    ;;
+                *'"phase":"applied"'*|*'"phase":"rolled_back"'*|*'"phase":"invalid_config"'*|*'"phase":"snapshot_failed"'*|*'"phase":"config_changed"'*|*'"phase":"done"'*|*'"phase":"operation_failed"'*|*'"phase":"rollback_failed"'*) ;;
+                *) publish "$id" interrupted ;;
+            esac
+            rm -f "$ticket" "$JOBS/$id/candidate" "$JOBS/$id/payload"
+        done
+        [ "${1:-}" != --once ] || return 0
+        if [ -r "$LIB/stgws.sh" ] && [ "$(date +%s)" -ge "${next_stgws_tick:-0}" ]; then
+            stgws_tick || :
+            next_stgws_tick=$(($(date +%s) + 60))
+        fi
+        if [ "$(date +%s)" -ge "${next_cleanup:-0}" ]; then
+            for path in "$JOBS"/*; do
+                [ -d "$path" ] || break
+                [ -f "$QUEUE/${path##*/}" ] && continue
+                timestamp=${path##*-}
+                case "$timestamp" in ''|*[!0-9]*) continue ;; esac
+                [ "$timestamp" -ge "$(($(date +%s) - 86400))" ] || rm -rf "$path"
+            done
+            next_cleanup=$(($(date +%s) + 300))
+        fi
+        sleep 2
+    done
+}
+
+case "${1:-}" in
+    apply) shift; enqueue zapret2 "$@" ;;
+    zapret) shift; enqueue zapret-module "$@" ;;
+    stgws) shift; enqueue stgws "$@" ;;
+    worker) shift; worker "$@" ;;
+    status|log|output)
+        if [ "${1:-}" = status ] && [ "$#" = 1 ]; then
+            if [ -r "$RUN/latest.json" ]; then cat "$RUN/latest.json"; else echo '{"phase":"idle"}'; fi
+        else
+            case "${2:-}" in ''|*[!0-9-]*) fail 'Invalid job ID' ;; esac
+            case "$1" in
+                log) cat "$JOBS/$2/events" ;;
+                output) [ ! -f "$JOBS/$2/output" ] || tail -c 8192 "$JOBS/$2/output" ;;
+                *) cat "$JOBS/$2/status.json" ;;
+            esac
+        fi
+        ;;
+    *)
+        kind=${1:-}
+        if [ -n "$kind" ] && [ -r "$LIB/vpn.sh" ]; then
+            . "$LIB/vpn.sh"
+            if ows_vpn_service "$kind" >/dev/null; then
+                shift
+                enqueue "$kind" "$@"
+                exit
+            fi
+        fi
+        fail 'Usage: ows apply FILE | MODULE ACTION | status [JOB] | log JOB | output JOB'
+        ;;
+esac

@@ -1,0 +1,8 @@
+{
+  "admin/services/zapret2": {
+    "depends": {
+      "acl": ["luci-app-zapret2"],
+      "fs": { "/usr/share/luci/menu.d/zz-luci-app-ows-zapret2.json": "absent" }
+    }
+  }
+}

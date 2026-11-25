@@ -1,0 +1,8 @@
+{
+  "schema": 1,
+  "id": "stgws",
+  "name": "sTGWS",
+  "version": "0.1.0",
+  "service": "tgws",
+  "description": "Состояние установленной службы sTGWS."
+}

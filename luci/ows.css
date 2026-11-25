@@ -1,0 +1,185 @@
+.ows [hidden] {
+    display: none !important;
+}
+
+.ows .ows-status,
+.ows .ows-overview {
+    border: 1px solid var(--border-color-medium, rgba(128, 128, 128, .32));
+    border-radius: .4rem;
+    padding: .8rem 1rem;
+    margin: .75rem 0 1rem;
+}
+
+.ows .ows-status,
+.ows .ows-overview,
+.ows .ows-module-heading,
+.ows .ows-actions {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: .5rem 1rem;
+}
+
+.ows .ows-status p,
+.ows .ows-overview h3,
+.ows .ows-overview p,
+.ows .ows-module-heading h3 {
+    margin: 0;
+}
+
+.ows .ows-status code:empty {
+    display: none;
+}
+
+.ows .ows-status details {
+    flex-basis: 100%;
+}
+
+.ows .ows-job-output {
+    max-height: 20rem;
+    overflow: auto;
+    white-space: pre-wrap;
+}
+
+.ows .ows-overview,
+.ows .ows-module-heading {
+    justify-content: space-between;
+}
+
+.ows .ows-overview h3 + p {
+    margin-top: .25rem;
+}
+
+.ows .ows-module-heading {
+    padding: .5rem 0;
+}
+
+.ows .ows-tabmenu {
+    margin-bottom: .9rem;
+}
+
+.ows .ows-fields,
+.ows .ows-review {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 18rem), 1fr));
+    gap: .75rem 1rem;
+}
+
+.ows .ows-field {
+    min-width: 0;
+}
+
+.ows .ows-field label {
+    display: block;
+    margin-bottom: .35rem;
+    font-weight: 600;
+}
+
+.ows .ows-field select {
+    width: 100%;
+    min-width: 0;
+}
+
+.ows .ows-actions {
+    margin: .9rem 0;
+}
+
+.ows .ows-review > div {
+    min-width: 0;
+}
+
+.ows .ows-review pre,
+.ows .ows-blob-table td {
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+}
+
+.ows .ows-catalog-add {
+    display: block;
+}
+
+.ows .ows-catalog-add summary {
+    cursor: pointer;
+    font-weight: 600;
+}
+
+.ows .ows-overview h4 {
+    margin: 0 0 .25rem;
+}
+
+.ows .ows-entry-actions {
+    margin: 0;
+}
+
+.ows .ows-field input.cbi-input-text {
+    box-sizing: border-box;
+    width: 100%;
+}
+
+.ows label.ows-field {
+    display: block;
+    margin: .35rem 0;
+}
+
+.ows label.ows-field > span {
+    display: block;
+    margin-bottom: .25rem;
+}
+
+.ows .ows-field textarea {
+    box-sizing: border-box;
+    width: 100%;
+}
+
+.ows .ows-service-preview {
+    border: 1px solid var(--border-color-medium, rgba(128, 128, 128, .32));
+    border-radius: .4rem;
+    margin: 1rem 0;
+    padding: .75rem 1rem;
+}
+
+.ows .ows-service-table {
+    overflow-x: auto;
+}
+
+.ows .ows-service-table td button {
+    margin: .15rem .35rem .15rem 0;
+}
+
+.ows .ows-section {
+    border-top: 1px solid var(--border-color-medium, rgba(128, 128, 128, .32));
+    margin: .75rem 0;
+    padding: .65rem 0;
+}
+
+.ows .ows-section summary {
+    cursor: pointer;
+    font-weight: 600;
+}
+
+.ows .ows-section[open] summary {
+    margin-bottom: .65rem;
+}
+
+.ows .ows-vpn-metric {
+    border: 1px solid var(--border-color-medium, rgba(128, 128, 128, .32));
+    border-radius: .4rem;
+    padding: .65rem .8rem;
+    overflow-wrap: anywhere;
+}
+
+.ows .ows-vpn-metric h5 {
+    margin: 0 0 .4rem;
+    font-size: 1em;
+}
+
+.ows .ows-vpn-metric p,
+.ows .ows-vpn-metric ul {
+    margin: .2rem 0;
+}
+.ows-native-frame {
+    display: block;
+    width: 100%;
+    height: max(30rem, 75vh);
+    border: 0;
+}

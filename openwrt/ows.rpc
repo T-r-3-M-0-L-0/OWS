@@ -1,0 +1,231 @@
+#!/bin/sh
+ows_status() {
+    . /usr/share/libubox/jshn.sh
+    result=$(/usr/sbin/ows status "$@") || exit 1
+    json_load "$result" || exit 1
+    json_get_var status_job job
+    case "$status_job" in
+        ''|*[!0-9-]*) ;;
+        *)
+            job_dir=/tmp/ows/jobs/$status_job
+            if [ -f "$job_dir/kind" ]; then
+                json_add_string kind "$(cat "$job_dir/kind")"
+                if [ -f "$job_dir/action" ]; then
+                    json_add_string action "$(cat "$job_dir/action")"
+                fi
+            fi
+            if [ -s "$job_dir/output" ]; then json_add_boolean has_output 1; fi
+            ;;
+    esac
+    json_dump
+}
+
+ows_vpn() (
+    . /usr/share/libubox/jshn.sh
+    json_load "$(cat)" || exit 1
+    json_get_vars id action target change
+    . /usr/lib/ows/vpn.sh
+    if ! service=$(ows_vpn_service "$id") || [ -z "$service" ]; then
+        echo '{"error":"VPN-драйвер OWS не подключён"}'
+        exit
+    fi
+    entry=/etc/ows/adapters/$id.json
+    if [ "$(jsonfilter -i "$entry" -e '@.kind' 2>/dev/null)" != adapter ] ||
+        [ "$(jsonfilter -i "$entry" -e '@.service' 2>/dev/null)" != "$service" ]; then
+        echo '{"error":"VPN-адаптер не подключён"}'
+        exit
+    fi
+    ows_vpn_load "$id" /usr/lib/ows || { echo '{"error":"Файлы VPN-драйвера недоступны"}'; exit; }
+    if [ "$1" = vpn_state ]; then
+        "${id}_info"
+        exit $?
+    fi
+    case "$1" in
+        vpn_editor) handler=${id}_editor_state ;;
+        vpn_nodes) handler=${id}_editor_nodes ;;
+        vpn_subscription_url) handler=${id}_subscription_url ;;
+        vpn_edit)
+            if ! "${id}_action_allowed" edit; then
+                echo '{"error":"Редактор для этого драйвера недоступен"}'; exit
+            fi
+            if [ -z "$change" ] || [ "${#change}" -gt 65536 ]; then
+                echo '{"error":"Пустой или слишком большой запрос"}'; exit
+            fi
+            umask 077
+            request=$(mktemp /tmp/ows-vpn-edit.XXXXXX) || exit 1
+            trap 'rm -f "$request"' EXIT
+            printf '%s\n' "$change" > "$request" || exit 1
+            json_init
+            if job=$(/usr/sbin/ows "$id" edit "$request"); then json_add_string job "$job"
+            else json_add_string error 'Не удалось поставить изменение в очередь'; fi
+            json_dump
+            exit
+            ;;
+    esac
+    if [ -n "${handler:-}" ]; then
+        if command -v "$handler" >/dev/null; then "$handler" "$target"
+        else echo '{"error":"Операция недоступна для этого драйвера"}'; fi
+        exit $?
+    fi
+    case "$action" in
+        diagnose) command=diag ;;
+        inspect_subscription) command=check:$target ;;
+        prepare_migration) command=prepare-migration ;;
+        probe_node) command=probe:$target ;;
+        probe_all_nodes) command=probe-all:$target ;;
+        preview_service_lists) command=list-preview:$target ;;
+        refresh_draft_subscription) command=refresh-draft-subscription ;;
+        check_handover) command=check-handover ;;
+        test_draft_lists) command=test-draft-lists ;;
+        takeover) command=takeover ;;
+        refresh_live_lists) command=refresh-live-lists ;;
+        refresh_live_subscription) command=refresh-live-subscription ;;
+        preview_draft) command=preview-draft:$target ;;
+        apply_draft) command=apply-draft:$target ;;
+        *) command='' ;;
+    esac
+    json_init
+    if [ -n "$command" ] && "${id}_action_allowed" "$command" && job=$(/usr/sbin/ows "$id" "$command"); then
+        json_add_string job "$job"
+    else
+        json_add_string error 'Действие VPN недоступно'
+    fi
+    json_dump
+)
+
+case "$1:$2" in
+    list:) echo '{"status":{},"job_status":{"job":""},"job_output":{"job":""},"catalog":{},"preview":{"profile":"","line":"","action":"","blob":"","expected":""},"apply_action":{"profile":"","line":"","action":"","blob":"","expected":""},"module_list":{},"module_status":{"id":""},"module_preview":{"manifest":""},"module_attach":{"manifest":""},"module_link":{"name":"","source":""},"stgws_info":{},"stgws_action":{"action":""},"steer_info":{},"steer_action":{"action":""},"vpn_state":{"id":""},"vpn_action":{"id":"","action":"","target":""},"vpn_editor":{"id":""},"vpn_nodes":{"id":"","target":""},"vpn_edit":{"id":"","change":""},"vpn_subscription_url":{"id":""},"vpn_list_page":{"job":"","kind":"","page":0,"search":""},"zapret_module_info":{"id":""},"zapret_module_action":{"id":"","action":""},"zapret_constructor":{"topic":""}}' ;;
+    call:vpn_state|call:vpn_action|call:vpn_editor|call:vpn_nodes|call:vpn_edit|call:vpn_subscription_url) ows_vpn "$2" ;;
+    call:status) ows_status ;;
+    call:zapret_module_info|call:zapret_module_action|call:zapret_constructor)
+        . /usr/share/libubox/jshn.sh
+        json_load "$(cat)" || exit 1
+        json_get_vars id action topic
+        . /usr/lib/ows/zapret-module.sh
+        . /usr/lib/ows/zapret-constructor.sh
+        RUN=/tmp/ows
+        case "$2" in
+            zapret_module_info) zapret_module_info "$id" ;;
+            zapret_constructor) zapret_constructor_state "$topic" ;;
+            zapret_module_action)
+                json_init
+                if [ "${#action}" -le 280 ] && zapret_module_action_allowed "$id" "$action" &&
+                    job=$(/usr/sbin/ows zapret "$id" "$action"); then
+                    json_add_string job "$job"
+                else
+                    json_add_string error 'Не удалось поставить действие Zapret в очередь'
+                fi
+                json_dump
+                ;;
+        esac
+        ;;
+    call:vpn_list_page)
+        . /usr/share/libubox/jshn.sh
+        json_load "$(cat)" || exit 1
+        json_get_vars job kind page search
+        case "$job" in ''|*[!0-9-]*) exit 1 ;; esac
+        case "$kind" in domains|prefixes|nodes) ;; *) exit 1 ;; esac
+        case "$page" in ''|0|0*|*[!0-9]*) exit 1 ;; esac
+        [ "$page" -le 100000 ] && [ "${#search}" -le 128 ] || exit 1
+        dir=/tmp/ows/jobs/$job
+        if [ ! -f "$dir/preview-$kind" ] ||
+            [ "$(jsonfilter -i "$dir/status.json" -e '@.phase' 2>/dev/null)" != done ]; then
+            echo '{"error":"Предпросмотр недоступен. Откройте список заново."}'
+        elif [ "$kind" = nodes ]; then
+            awk -v page="$page" 'NR>(page-1)*80 && NR<=page*80 {print} NR>=page*80 {exit}' \
+                "$dir/preview-nodes" | jq -cs '{entries:.}'
+        else
+            OWS_PREVIEW_SEARCH=$search LC_ALL=C awk -v page="$page" '
+                BEGIN {term=tolower(ENVIRON["OWS_PREVIEW_SEARCH"])}
+                term=="" || index(tolower($0),term) {
+                    found++; if (found>(page-1)*80 && found<=page*80) print substr($0,1,512)
+                }
+                END {print found+0}
+            ' "$dir/preview-$kind" | jq -Rsc 'split("\n")[:-1] | {entries:.[:-1],total:(.[-1]|tonumber)}'
+        fi
+        ;;
+    call:job_status|call:job_output)
+        . /usr/share/libubox/jshn.sh
+        json_load "$(cat)" || exit 1
+        json_get_var job job
+        [ -n "$job" ] || exit 1
+        if [ "$2" = job_status ]; then
+            ows_status "$job"
+        else
+            output=$(/usr/sbin/ows output "$job") || exit 1
+            json_init
+            json_add_string output "$output"
+            result=/tmp/ows/jobs/$job/result.json
+            if [ -r "$result" ]; then
+                case "$(jsonfilter -i "$result" -e '@.kind' 2>/dev/null)" in
+                    node_batch|list_preview|draft_preview)
+                        jq -c --arg output "$output" '{output:$output,result:.}' "$result"
+                        exit $?
+                        ;;
+                esac
+                ok=$(jsonfilter -i "$result" -e '@.ok' 2>/dev/null)
+                if [ "$ok" = true ] || [ "$ok" = false ]; then
+                    json_add_object probe
+                    if [ "$ok" = true ]; then json_add_boolean ok 1; else json_add_boolean ok 0; fi
+                    for metric in handshake_ms ttfb_ms; do
+                        value=$(jsonfilter -i "$result" -e "@.$metric" 2>/dev/null)
+                        case "$value" in ''|*[!0-9]*) ;; *) json_add_int "$metric" "$value" ;; esac
+                    done
+                    json_close_object
+                fi
+            fi
+            json_dump
+        fi
+        ;;
+    call:catalog|call:preview|call:apply_action)
+        . /usr/lib/ows/zapret2-editor.sh
+        editor_request "$2"
+        ;;
+    call:module_list|call:module_status|call:module_preview|call:module_attach|call:module_link)
+        . /usr/lib/ows/registry.sh
+        registry_request "$2"
+        ;;
+    call:stgws_info|call:stgws_action)
+        . /usr/share/libubox/jshn.sh
+        . /usr/lib/ows/stgws.sh
+        entry=/etc/ows/adapters/stgws.json
+        if [ "$(jsonfilter -i "$entry" -e '@.kind' 2>/dev/null)" != adapter ] ||
+            [ "$(jsonfilter -i "$entry" -e '@.service' 2>/dev/null)" != tgws ]; then
+            echo '{"error":"Адаптер sTGWS не подключён"}'
+        elif [ "$2" = stgws_info ]; then
+            stgws_info
+        else
+            json_load "$(cat)" || exit 1
+            json_get_var action action
+            json_init
+            if stgws_action_allowed "$action" && job=$(/usr/sbin/ows stgws "$action"); then
+                json_add_string job "$job"
+            else
+                json_add_string error 'Не удалось поставить операцию sTGWS в очередь'
+            fi
+            json_dump
+        fi
+        ;;
+    call:steer_info|call:steer_action)
+        . /usr/share/libubox/jshn.sh
+        . /usr/lib/ows/steer.sh
+        entry=/etc/ows/adapters/steer.json
+        if [ "$(jsonfilter -i "$entry" -e '@.kind' 2>/dev/null)" != adapter ] ||
+            [ "$(jsonfilter -i "$entry" -e '@.service' 2>/dev/null)" != steer ]; then
+            echo '{"error":"Адаптер steer не подключён"}'
+        elif [ "$2" = steer_info ]; then
+            steer_info
+        else
+            json_load "$(cat)" || exit 1
+            json_get_var action action
+            json_init
+            if steer_action_allowed "$action" && job=$(/usr/sbin/ows steer "$action"); then
+                json_add_string job "$job"
+            else
+                json_add_string error 'Не удалось поставить проверку steer в очередь'
+            fi
+            json_dump
+        fi
+        ;;
+    *) exit 1 ;;
+esac

@@ -1,0 +1,8 @@
+{
+  "schema": 1,
+  "id": "steer",
+  "name": "steer",
+  "version": "0.1.0",
+  "service": "steer",
+  "description": "Состояние ядра, выходы и локальная проверка подписок steer."
+}
