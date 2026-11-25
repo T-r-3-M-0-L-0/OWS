@@ -42,6 +42,10 @@ enqueue() (
             . "$LIB/stgws.sh"
             [ "$#" = 1 ] && stgws_action_allowed "$1" || fail 'Unknown sTGWS action'
             ;;
+        tg-ws-proxy)
+            . "$LIB/tg-ws-proxy.sh"
+            [ "$#" = 1 ] && tgws_proxy_action_allowed "$1" || fail 'Unknown Telegram proxy action'
+            ;;
         zapret-module)
             . "$LIB/zapret-module.sh"
             . "$LIB/zapret-constructor.sh"
@@ -154,6 +158,10 @@ process_module() {
         export OWS_JOB_RESULT="$JOBS/$id/result.json"
         case "$kind" in
             stgws) stgws_execute "$action" ;;
+            tg-ws-proxy)
+                . "$LIB/tg-ws-proxy.sh"
+                tgws_proxy_execute "$action"
+                ;;
             zapret-module)
                 . "$LIB/zapret-module.sh"
                 . "$LIB/zapret-constructor.sh"
@@ -228,6 +236,7 @@ case "${1:-}" in
     apply) shift; enqueue zapret2 "$@" ;;
     zapret) shift; enqueue zapret-module "$@" ;;
     stgws) shift; enqueue stgws "$@" ;;
+    tg-ws-proxy) shift; enqueue tg-ws-proxy "$@" ;;
     worker) shift; worker "$@" ;;
     status|log|output)
         if [ "${1:-}" = status ] && [ "$#" = 1 ]; then

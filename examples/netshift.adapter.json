@@ -1,0 +1,9 @@
+{
+  "schema": 1,
+  "id": "netshift",
+  "name": "NetShift",
+  "version": "0.1.0",
+  "service": "netshift",
+  "category": "proxy",
+  "description": "Состояние sing-box и штатные настройки NetShift."
+}

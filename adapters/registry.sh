@@ -29,6 +29,7 @@ registry_json() {
         json_add_string version "$version"
         json_add_string service "$service"
         json_add_string description "$description"
+        [ -z "$category" ] || json_add_string category "$category"
     fi
 }
 
@@ -55,14 +56,14 @@ registry_manifest() {
                 json_get_type field_type "$key"
                 [ "$field_type" = int ] || registry_error 'Номер схемы должен быть числом'
                 ;;
-            id|name|version|service|description|source)
+            id|name|version|service|description|source|category)
                 json_get_type field_type "$key"
                 [ "$field_type" = string ] || registry_error 'Поля манифеста должны быть строками'
                 ;;
             *) registry_error 'В манифесте есть неподдерживаемые поля' ;;
         esac
     done
-    json_get_vars schema id name version service description source
+    json_get_vars schema id name version service description source category
     [ "$schema" = 1 ] || registry_error 'Поддерживается только схема 1'
     valid_id "$id" || registry_error 'Некорректный идентификатор адаптера'
     case "$id" in overview|zapret|zapret2|link-*) registry_error 'Идентификатор зарезервирован' ;; esac
@@ -71,6 +72,7 @@ registry_manifest() {
     [ -n "$version" ] && [ "${#version}" -le 32 ] || registry_error 'Укажите версию адаптера'
     [ "${#description}" -le 400 ] || registry_error 'Описание превышает 400 символов'
     [ -z "$source" ] || valid_url "$source" || registry_error 'Источник должен быть ссылкой HTTPS'
+    case "$category" in ''|proxy) ;; *) registry_error 'Допустимая категория адаптера — proxy' ;; esac
     kind=adapter
 }
 

@@ -4,5 +4,6 @@
   "name": "steer",
   "version": "0.1.0",
   "service": "steer",
+  "category": "proxy",
   "description": "Состояние ядра, выходы и локальная проверка подписок steer."
 }

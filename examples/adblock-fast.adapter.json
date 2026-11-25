@@ -1,0 +1,8 @@
+{
+  "schema": 1,
+  "id": "adblock-fast",
+  "name": "AdBlock Fast",
+  "version": "0.1.0",
+  "service": "adblock-fast",
+  "description": "Штатное управление списками и блокировкой DNS."
+}

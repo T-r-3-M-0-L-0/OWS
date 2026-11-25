@@ -6,8 +6,10 @@
 'require session';
 'require ui';
 'require view.ows-stgws as stgws';
+'require view.ows-tg-proxy as tgProxy';
 'require view.ows-vpn-panel as vpn';
 'require view.ows-zapret as zapret';
+'require view.ows-native as nativeView';
 
 var status = rpc.declare({ object: 'ows', method: 'status' });
 var jobStatus = rpc.declare({ object: 'ows', method: 'job_status', params: ['job'] });
@@ -275,7 +277,8 @@ function adapterCatalog(onChange) {
                 });
                 previewPane.replaceChildren(
                     E('h4', {}, result.name),
-                    E('p', {}, [result.version, ' · ', E('code', {}, result.service)]),
+                    E('p', {}, [result.version, ' · ', E('code', {}, result.service),
+                        result.category === 'proxy' ? ' · ' + _('Прокси') : '']),
                     E('p', {}, result.description || ''),
                     attach
                 );
@@ -563,6 +566,7 @@ return view.extend({
         });
         var workspace = E('div');
         var registry = adapterCatalog(renderModules);
+        var selectedProxy;
         var zapret2Panel = E('div', {}, [
             E('div', { class: 'ows-module-heading' }, [E('h3', {}, _('Zapret2')), refreshButton]),
             notice, zapret2.content, zapret2Module.feedback
@@ -579,26 +583,68 @@ return view.extend({
                 {name:'Zapret2',description:_('Движок nfqws2, редактор тактик и конструктор'),tab:1},
                 {name:'Zapret',description:_('Первая версия, движок nfqws'),tab:2}
             ];
+            var proxyTabs = [];
+            var proxyContent = E('div');
+            var proxyTabIndex = tabs.length;
+            var proxyModules;
+
+            function openProxies(index) {
+                if (proxyModules) {
+                    if (index != null) proxyModules.select(index);
+                    return;
+                }
+                if (!proxyTabs.length) {
+                    proxyContent.replaceChildren(E('p', {}, _('Добавьте адаптер прокси через «Обзор».')));
+                    return;
+                }
+                proxyModules = createTabs(_('Модули прокси'), proxyTabs, index == null ? selectedProxy : index,
+                    function(id) { selectedProxy = id; });
+                proxyContent.replaceChildren(proxyModules.content);
+            }
+
+            tabs.push({ id: 'proxies', label: _('Прокси'), content: proxyContent, activate: openProxies });
             entries.forEach(function(entry) {
                 if (entry.id === 'zapret' || entry.id === 'zapret2') return;
-                if (entry.kind === 'adapter') {
-                    rows.push(Object.assign({ tab: tabs.length }, entry));
-                    if (entry.id === 'stgws' && entry.service === 'tgws') {
-                        tabs.push(stgws.tab(entry, createTabs, followJob));
-                    } else if (vpn.supports(entry, vpnDrivers)) {
-                        tabs.push(vpn.tab(entry, createTabs, followJob));
-                    } else {
-                        tabs.push(adapterTab(entry));
-                    }
-                } else {
+                if (entry.kind !== 'adapter') {
                     rows.push(entry);
+                    return;
+                }
+                var tab;
+                var isProxy = true;
+                if (entry.id === 'stgws' && entry.service === 'tgws') {
+                    tab = stgws.tab(entry, createTabs, followJob);
+                } else if (entry.id === 'tg-ws-proxy' && entry.service === 'tg-ws-proxy') {
+                    tab = tgProxy.tab(entry, followJob);
+                } else if (vpn.supports(entry, vpnDrivers)) {
+                    tab = vpn.tab(entry, createTabs, followJob);
+                } else {
+                    isProxy = entry.category === 'proxy';
+                    if (entry.id === 'adblock-fast' && entry.service === 'adblock-fast') {
+                        tab = nativeView.tab({
+                            id: 'module-' + entry.id, route: 'adblock-fast', acl: 'luci-app-adblock-fast',
+                            available: function() { return true; }
+                        });
+                        tab.label = entry.name;
+                    } else {
+                        tab = adapterTab(entry);
+                    }
+                }
+                if (isProxy) {
+                    rows.push(Object.assign({ tab: proxyTabIndex, proxy: proxyTabs.length }, entry));
+                    proxyTabs.push(tab);
+                } else {
+                    rows.push(Object.assign({ tab: tabs.length }, entry));
+                    tabs.push(tab);
                 }
             });
             registry.list.replaceChildren.apply(registry.list, rows.map(function(entry) {
                 var actions = [];
                 if (entry.tab != null) {
                     var open = E('button', { class: 'cbi-button', type: 'button' }, _('Открыть'));
-                    open.addEventListener('click', function() { modules.select(entry.tab); });
+                    open.addEventListener('click', function() {
+                        if (entry.proxy != null) openProxies(entry.proxy);
+                        modules.select(entry.tab);
+                    });
                     actions.push(open);
                 }
                 var link = entrySource(entry);

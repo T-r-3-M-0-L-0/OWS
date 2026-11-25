@@ -2,6 +2,7 @@
 'require baseclass';
 'require rpc';
 'require view.ows-vpn-editor as editor';
+'require view.ows-native as nativeView';
 
 var info = rpc.declare({ object: 'ows', method: 'vpn_state', params: ['id'] });
 var execute = rpc.declare({ object: 'ows', method: 'vpn_action', params: ['id', 'action', 'target'] });
@@ -264,6 +265,12 @@ return baseclass.extend({
         }
 
         function statusPanel(data, outputName, canDiagnose) {
+            if (entry.id === 'netshift') return [
+                E('p', {}, !data.installed ? _('NetShift не установлен') : data.running ?
+                    _('sing-box запущен, таблица NetShiftTable загружена') : _('NetShift не активен')),
+                E('p', {}, [_('Версия пакета'), ' · ', data.version || '—']),
+                canDiagnose ? button(_('Проверить состояние'), 'diagnose', true) : ''
+            ];
             var runtime = data.runtime || {};
             var summary = data.summary || {};
             var kinds = summary.list_kinds || {};
@@ -427,13 +434,17 @@ return baseclass.extend({
         function mountTabs(ui, abilities, hasSubscription, migrated) {
             configEditor.configure(ui, abilities);
             var migrationVisible = ui.migration === true && !migrated;
-            var layout = JSON.stringify([ui.editor || [], ui.plugins === true, migrationVisible, ui.write_mode, hasSubscription]);
+            var layout = JSON.stringify([ui.editor || [], ui.plugins === true, migrationVisible, ui.write_mode, hasSubscription, ui.native]);
             if (currentLayout === layout) return;
             currentLayout = layout;
             var sections = [{
                 id: prefix + 'status', label: hasSubscription ? _('Состояние и подписки') : _('Состояние'),
                 content: E('div', {}, [hasSubscription ? subscriptions : '', status, ui.plugins ? plugins : ''])
             }].concat(configEditor.tabs());
+            if (entry.id === 'netshift' && ui.native) sections.push(nativeView.tab({
+                id: prefix + 'native', route: 'netshift', acl: 'luci-app-netshift',
+                available: function() { return true; }
+            }));
             if (migrationVisible) sections.push({id: prefix + 'migration', label: _('Перенос'), content: migration});
             tabsHost.replaceChildren(createTabs(_('Разделы VPN'), sections).content);
         }

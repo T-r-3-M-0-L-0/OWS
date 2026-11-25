@@ -20,6 +20,8 @@ for cmd in uci flock pgrep cmp mktemp dd sha256sum; do
 done
 for path in bin/ows adapters/zapret2.sh openwrt/ows.init; do sh -n "$SRC/$path"; done
 sh -n "$SRC/adapters/stgws.sh"
+sh -n "$SRC/adapters/netshift.sh"
+sh -n "$SRC/adapters/tg-ws-proxy.sh"
 sh -n "$SRC/adapters/zapret-module.sh"
 sh -n "$SRC/adapters/zapret-constructor.sh"
 sh -n "$SRC/adapters/steer.sh"
@@ -46,10 +48,11 @@ if [ "$luci" = 1 ]; then
     sh -n "$SRC/openwrt/ows.rpc"
     sh -n "$SRC/adapters/zapret2-editor.sh"
     sh -n "$SRC/adapters/registry.sh"
-    for path in luci/ows.js luci/ows-stgws.js luci/ows-vpn.js luci/ows-vpn-editor.js luci/ows-zapret.js luci/ows-native.js luci/ows.css luci/menu.json luci/menu-zapret2.json luci/acl.json; do [ -s "$SRC/$path" ] || fail "Missing $path"; done
+    for path in luci/ows.js luci/ows-stgws.js luci/ows-tg-proxy.js luci/ows-vpn.js luci/ows-vpn-editor.js luci/ows-zapret.js luci/ows-native.js luci/ows.css luci/menu.json luci/menu-zapret2.json luci/acl.json; do [ -s "$SRC/$path" ] || fail "Missing $path"; done
     set -- "$@" /usr/libexec/rpcd/ows /usr/share/rpcd/acl.d/luci-app-ows.json \
         /usr/share/luci/menu.d/luci-app-ows.json /www/luci-static/resources/view/ows-services.js \
         /www/luci-static/resources/view/ows-services.css /www/luci-static/resources/view/ows-stgws.js \
+        /www/luci-static/resources/view/ows-tg-proxy.js \
         /www/luci-static/resources/view/ows-vpn-panel.js /www/luci-static/resources/view/ows-vpn-editor.js \
         /www/luci-static/resources/view/ows-zapret.js /www/luci-static/resources/view/ows-native.js \
         /usr/share/luci/menu.d/zz-luci-app-ows-zapret2.json
@@ -70,6 +73,8 @@ put adapters/zapret2.sh /usr/lib/ows/zapret2.sh 644
 put adapters/zapret-module.sh /usr/lib/ows/zapret-module.sh 644
 put adapters/zapret-constructor.sh /usr/lib/ows/zapret-constructor.sh 644
 put adapters/stgws.sh /usr/lib/ows/stgws.sh 644
+put adapters/netshift.sh /usr/lib/ows/netshift.sh 644
+put adapters/tg-ws-proxy.sh /usr/lib/ows/tg-ws-proxy.sh 644
 put adapters/steer.sh /usr/lib/ows/steer.sh 644
 put adapters/steer-migration.sh /usr/lib/ows/steer-migration.sh 644
 put adapters/steer-editor.sh /usr/lib/ows/steer-editor.sh 644
@@ -93,6 +98,7 @@ if [ "$luci" = 1 ]; then
     put luci/menu.json /usr/share/luci/menu.d/luci-app-ows.json 644
     put luci/ows.js /www/luci-static/resources/view/ows-services.js 644
     put luci/ows-stgws.js /www/luci-static/resources/view/ows-stgws.js 644
+    put luci/ows-tg-proxy.js /www/luci-static/resources/view/ows-tg-proxy.js 644
     put luci/ows-vpn.js /www/luci-static/resources/view/ows-vpn-panel.js 644
     put luci/ows-vpn-editor.js /www/luci-static/resources/view/ows-vpn-editor.js 644
     put luci/ows-zapret.js /www/luci-static/resources/view/ows-zapret.js 644

@@ -2,7 +2,7 @@
 
 # Register trusted VPN drivers shipped with OWS. User manifests select a
 # registered id/service pair but cannot provide a driver executable.
-OWS_VPN_DRIVERS='steer:steer'
+OWS_VPN_DRIVERS='steer:steer netshift:netshift'
 
 ows_vpn_service() {
     case "$1" in ''|*[!a-z0-9-]*) return 1 ;; esac

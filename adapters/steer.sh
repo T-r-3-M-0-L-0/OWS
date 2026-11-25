@@ -59,12 +59,12 @@ steer_info() {
         echo '{"error":"Для адаптера steer требуется jq"}'
         return
     fi
-    if ! command -v timeout >/dev/null; then
-        echo '{"error":"Для адаптера steer требуется timeout"}'
-        return
-    fi
     local help=''
     if command -v steer >/dev/null; then
+        if ! command -v timeout >/dev/null; then
+            echo '{"error":"Для адаптера steer требуется timeout"}'
+            return
+        fi
         installed=1
         version=$(timeout 5 steer --version 2>/dev/null | awk 'NR==1 {print $2}')
         help=$(timeout 5 steer --help 2>&1 || :)
