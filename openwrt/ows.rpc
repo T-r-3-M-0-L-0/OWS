@@ -94,7 +94,7 @@ ows_vpn() (
 )
 
 case "$1:$2" in
-    list:) echo '{"status":{},"job_status":{"job":""},"job_output":{"job":""},"catalog":{},"preview":{"profile":"","line":"","action":"","blob":"","expected":""},"apply_action":{"profile":"","line":"","action":"","blob":"","expected":""},"module_list":{},"module_status":{"id":""},"module_preview":{"manifest":""},"module_attach":{"manifest":""},"module_link":{"name":"","source":""},"stgws_info":{},"stgws_action":{"action":""},"tg_proxy_info":{},"tg_proxy_action":{"action":""},"steer_info":{},"steer_action":{"action":""},"vpn_state":{"id":""},"vpn_action":{"id":"","action":"","target":""},"vpn_editor":{"id":""},"vpn_nodes":{"id":"","target":""},"vpn_edit":{"id":"","change":""},"vpn_subscription_url":{"id":""},"vpn_list_page":{"job":"","kind":"","page":0,"search":""},"zapret_module_info":{"id":""},"zapret_module_action":{"id":"","action":""},"dns_info":{},"dns_check":{},"zapret_presets":{},"zapret_preset_preview":{"name":""},"zapret_preset_write":{"operation":"","name":"","expected":"","selection":""},"zapret_constructor":{"topic":""}}' ;;
+    list:) echo '{"status":{},"job_status":{"job":""},"job_output":{"job":""},"catalog":{},"preview":{"profile":"","line":"","action":"","blob":"","expected":""},"apply_action":{"profile":"","line":"","action":"","blob":"","expected":""},"module_list":{},"module_status":{"id":""},"module_preview":{"manifest":""},"module_attach":{"manifest":""},"module_link":{"name":"","source":""},"stgws_info":{},"stgws_action":{"action":""},"tg_proxy_info":{},"tg_proxy_action":{"action":""},"steer_info":{},"steer_action":{"action":""},"vpn_state":{"id":""},"vpn_action":{"id":"","action":"","target":""},"vpn_editor":{"id":""},"vpn_nodes":{"id":"","target":""},"vpn_edit":{"id":"","change":""},"vpn_subscription_url":{"id":""},"vpn_list_page":{"job":"","kind":"","page":0,"search":""},"zapret_module_info":{"id":""},"zapret_module_action":{"id":"","action":""},"update_info":{},"update_action":{"operation":"","value":""},"dns_info":{},"dns_check":{},"zapret_presets":{},"zapret_preset_preview":{"name":""},"zapret_preset_write":{"operation":"","name":"","expected":"","selection":""},"zapret_constructor":{"topic":""}}' ;;
     call:vpn_state|call:vpn_action|call:vpn_editor|call:vpn_nodes|call:vpn_edit|call:vpn_subscription_url) ows_vpn "$2" ;;
     call:tg_proxy_info|call:tg_proxy_action)
         . /usr/share/libubox/jshn.sh
@@ -118,6 +118,30 @@ case "$1:$2" in
         fi
         ;;
     call:status) ows_status ;;
+    call:update_info) /usr/sbin/ows-update status ;;
+    call:update_action)
+        . /usr/share/libubox/jshn.sh
+        json_load "$(cat)" || exit 1
+        json_get_vars operation value
+        case "$operation" in
+            check|install)
+                if /etc/init.d/ows-update status >/dev/null 2>&1; then
+                    message=$(/usr/sbin/ows-update request "$operation" "$value" 2>&1) && success=1
+                else
+                    message='Служба обновления OWS не запущена'
+                fi
+                ;;
+            mode) message=$(/usr/sbin/ows-update mode "$value" 2>&1) && success=1 ;;
+            *) message='Неизвестная операция обновления' ;;
+        esac
+        json_init
+        if [ "${success:-0}" = 1 ]; then
+            json_add_boolean ok 1
+        else
+            json_add_string error "${message:-Не удалось выполнить операцию обновления}"
+        fi
+        json_dump
+        ;;
     call:dns_info|call:dns_check)
         . /usr/lib/ows/dns.sh
         if [ "$2" = dns_info ]; then

@@ -3,12 +3,13 @@ set -eu
 umask 077
 
 SRC=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-check=0 upgrade=0 luci=0
+check=0 upgrade=0 luci=0 expected_version=''
 for arg in "$@"; do
     case "$arg" in
         --check) check=1 ;;
         --upgrade) upgrade=1 ;;
         --luci) luci=1 ;;
+        --expect-version=?*) expected_version=${arg#*=} ;;
         *) echo 'Usage: sh install.sh [--check] [--upgrade] [--luci]' >&2; exit 2 ;;
     esac
 done
@@ -16,6 +17,10 @@ fail() { echo "$*" >&2; exit 1; }
 
 upgrade_ready() {
     [ "$upgrade" = 1 ] || return 0
+    if [ -n "$expected_version" ]; then
+        [ -f /etc/ows/version ] && [ "$(cat /etc/ows/version)" = "$expected_version" ] ||
+            fail 'Установленная версия OWS уже изменилась. Проверьте релиз заново.'
+    fi
     for ticket in /tmp/ows/queue/*; do
         [ ! -f "$ticket" ] || fail 'Wait for OWS jobs to finish before upgrading'
     done
@@ -29,6 +34,7 @@ adapters/zapret-module.sh /usr/lib/ows/zapret-module.sh 644
 adapters/zapret-constructor.sh /usr/lib/ows/zapret-constructor.sh 644
 adapters/zapret-presets.sh /usr/lib/ows/zapret-presets.sh 644
 adapters/dns.sh /usr/lib/ows/dns.sh 644
+adapters/release-version.sh /usr/lib/ows/release-version.sh 644
 adapters/stgws.sh /usr/lib/ows/stgws.sh 644
 adapters/netshift.sh /usr/lib/ows/netshift.sh 644
 adapters/tg-ws-proxy.sh /usr/lib/ows/tg-ws-proxy.sh 644
@@ -46,7 +52,10 @@ adapters/steer-outputs.json /usr/lib/ows/steer-outputs.json 644
 adapters/vpn.sh /usr/lib/ows/vpn.sh 644
 openwrt/stgws-route.sh /usr/lib/ows/stgws-route.sh 644
 bin/ows /usr/sbin/ows 755
+bin/ows-update /usr/sbin/ows-update 755
 openwrt/ows.init /etc/init.d/ows 755
+openwrt/ows-update.init /etc/init.d/ows-update 755
+VERSION /etc/ows/version 644
 FILES
     if [ "$luci" = 1 ]; then
         cat <<'FILES'
@@ -65,6 +74,7 @@ luci/ows-vpn-editor.js /www/luci-static/resources/view/ows-vpn-editor.js 644
 luci/ows-zapret.js /www/luci-static/resources/view/ows-zapret.js 644
 luci/ows-zapret-tools.js /www/luci-static/resources/view/ows-zapret-tools.js 644
 luci/ows-dns.js /www/luci-static/resources/view/ows-dns.js 644
+luci/ows-update.js /www/luci-static/resources/view/ows-update.js 644
 luci/ows-native.js /www/luci-static/resources/view/ows-native.js 644
 luci/ows.css /www/luci-static/resources/view/ows-services.css 644
 luci/menu-zapret2.json /usr/share/luci/menu.d/zz-luci-app-ows-zapret2.json 644
@@ -77,6 +87,11 @@ FILES
 for cmd in uci flock pgrep cmp mktemp dd sha256sum tail; do
     command -v "$cmd" >/dev/null || fail "Missing dependency: $cmd"
 done
+[ -z "$expected_version" ] || [ "$upgrade" = 1 ] || fail '--expect-version requires --upgrade'
+[ -r "$SRC/adapters/release-version.sh" ] || fail 'Missing release version validator'
+. "$SRC/adapters/release-version.sh"
+[ -r "$SRC/VERSION" ] && ows_version_valid "$(cat "$SRC/VERSION")" || fail 'Invalid OWS VERSION'
+[ -z "$expected_version" ] || ows_version_valid "$expected_version" || fail 'Invalid expected OWS version'
 if [ "$upgrade" = 1 ]; then
     [ -x /usr/sbin/ows ] && [ -x /etc/init.d/ows ] && [ -d /etc/ows ] ||
         fail 'OWS must be installed before upgrading'
@@ -97,7 +112,7 @@ fi
 files=$(file_list)
 while read -r source path mode; do
     [ -s "$SRC/$source" ] || fail "Missing $source"
-    case "$source" in *.sh|*.init|*.rpc|bin/ows) sh -n "$SRC/$source" || exit 1 ;; esac
+    case "$source" in *.sh|*.init|*.rpc|bin/*) sh -n "$SRC/$source" || exit 1 ;; esac
     if [ "$mode" = keep ]; then continue; fi
     if [ -L "$path" ] || { [ -e "$path" ] && { [ "$upgrade" = 0 ] || [ ! -f "$path" ]; }; }; then
         fail "Unexpected existing path: $path"
@@ -119,7 +134,9 @@ upgrade_ready
 backup=$(mktemp -d /root/ows-upgrade.XXXXXX)
 touched=$backup/changed
 : > "$touched"
-was_running=0 enabled_here=0 service_touched=0 library_created=0 state_created=0
+was_running=0 enabled_here=0 updater_added=0 service_touched=0 library_created=0 state_created=0
+updater_exists=0
+[ ! -x /etc/init.d/ows-update ] || updater_exists=1
 if [ "$upgrade" = 1 ] && /etc/init.d/ows status 7>&- 8>&- >/dev/null 2>&1; then was_running=1; fi
 
 atomic_copy() (
@@ -151,6 +168,10 @@ rollback() {
         /etc/init.d/ows stop 7>&- 8>&- || broken=1
     fi
     if [ "$enabled_here" = 1 ]; then /etc/init.d/ows disable 7>&- 8>&- || broken=1; fi
+    if [ "$updater_added" = 1 ]; then
+        /etc/init.d/ows-update stop 7>&- 8>&- || broken=1
+        /etc/init.d/ows-update disable 7>&- 8>&- || broken=1
+    fi
     while IFS= read -r path; do
         if [ -f "$backup$path" ]; then
             atomic_copy "$backup$path" "$path" restore || broken=1
@@ -193,6 +214,7 @@ if [ "$was_running" = 1 ]; then
     /etc/init.d/ows stop 7>&- 8>&-
 fi
 while read -r source path mode; do
+    [ "$source" != VERSION ] || continue
     if [ "$mode" = keep ]; then
         if [ -e "$path" ] || [ -L "$path" ]; then continue; fi
         mode=644
@@ -215,6 +237,13 @@ if [ "$was_running" = 1 ] || [ "$upgrade" = 0 ]; then
         sleep 1
     done
     /etc/init.d/ows status 7>&- 8>&- >/dev/null 2>&1 || fail 'OWS worker did not start'
+fi
+printf '%s\n' /etc/ows/version >> "$touched"
+atomic_copy "$SRC/VERSION" /etc/ows/version 644
+if [ "$updater_exists" = 0 ]; then
+    updater_added=1
+    /etc/init.d/ows-update enable 7>&- 8>&-
+    /etc/init.d/ows-update start 7>&- 8>&-
 fi
 trap - EXIT HUP INT TERM
 if [ "$upgrade" = 1 ]; then
