@@ -9,6 +9,7 @@
 'require view.ows-zapret as zapret';
 'require view.ows-zapret-tools as zapretTools';
 'require view.ows-dns as dns';
+'require view.ows-update as updater';
 
 var status = rpc.declare({ object: 'ows', method: 'status' });
 var jobStatus = rpc.declare({ object: 'ows', method: 'job_status', params: ['job'] });
@@ -628,6 +629,7 @@ return view.extend({
 
             tabs.push({ id: 'proxies', label: proxyGroup.label, content: proxyContent, activate: openProxies });
             tabs.push(templates.panel(dns.tab(followJob)));
+            tabs.push(templates.panel(updater.tab()));
             entries.forEach(function(entry) {
                 if (entry.id === 'zapret' || entry.id === 'zapret2') return;
                 if (entry.kind !== 'adapter') {

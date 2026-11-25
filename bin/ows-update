@@ -1,0 +1,304 @@
+#!/bin/sh
+
+umask 077
+STATE=/etc/ows/update
+RUN=/tmp/ows-update
+REPO=T-r-3-M-0-L-0/OWS
+INTERVAL=21600
+MAX_ARCHIVE=4194304
+
+. /usr/lib/ows/release-version.sh
+
+version_newer() {
+    awk -v new="$1" -v old="$2" 'BEGIN {
+        split(new,a,"."); split(old,b,".")
+        for (i=1;i<=3;i++) {
+            if (a[i]+0>b[i]+0) exit 0
+            if (a[i]+0<b[i]+0) exit 1
+        }
+        exit 1
+    }'
+}
+
+installed_version() {
+    local version
+    if [ -r /etc/ows/version ] && IFS= read -r version < /etc/ows/version && ows_version_valid "$version"; then
+        printf '%s\n' "$version"
+    fi
+}
+
+update_mode() {
+    local mode
+    if [ -r "$STATE/mode" ] && IFS= read -r mode < "$STATE/mode"; then
+        case "$mode" in off|check|auto) printf '%s\n' "$mode"; return ;; esac
+    fi
+    echo check
+}
+
+write_state() {
+    jq -nc --arg phase "$1" --arg message "$2" --arg latest "$latest" \
+        --argjson checked "$checked" '{phase:$phase,message:$message,latest:$latest,checked:$checked}' \
+        > "$RUN/status.new" && mv -f "$RUN/status.new" "$RUN/status.json"
+}
+
+update_fail() {
+    write_state "$1" "$2"
+    printf '%s\n' "$2" >&2
+    exit 1
+}
+
+show_status() {
+    local state='{}' last trusted=false queued=false phase
+    last=$(cat "$STATE/last-install.json" 2>/dev/null || echo '{}')
+    [ ! -s "$STATE/release.pub" ] || trusted=true
+    if owned_update_directory; then
+        state=$(cat "$RUN/status.json" 2>/dev/null || echo '{}')
+        [ ! -s "$RUN/request" ] || queued=true
+    fi
+    phase=$(printf '%s\n' "$state" | jq -r '.phase//"idle"')
+    case "$phase" in
+        checking|downloading|installing)
+            if (exec 8>"$RUN/lock"; flock -n 8); then
+                state=$(printf '%s\n' "$state" | jq -c '.phase="interrupted"|.message="Обновление было прервано."')
+            fi
+            ;;
+    esac
+    jq -nc --argjson state "$state" --argjson last "$last" --arg installed "$(installed_version)" \
+        --arg mode "$(update_mode)" --argjson trusted "$trusted" --argjson queued "$queued" '
+        {installed:$installed,mode:$mode,trusted:$trusted,queued:$queued,
+         phase:($state.phase//"idle"),message:($state.message//""),latest:($state.latest//""),
+         checked:($state.checked//0),backup:($last.backup//""),last_install:($last.version//""),
+         install_result:($last.result//"")}'
+}
+
+take_lock() {
+    update_directory || return 1
+    exec 8>"$RUN/lock"
+    flock -n 8
+}
+
+update_directory() {
+    [ ! -L "$RUN" ] && mkdir -p "$RUN" && owned_update_directory
+}
+
+owned_update_directory() {
+    [ -d "$RUN" ] && [ ! -L "$RUN" ] && [ -O "$RUN" ]
+}
+
+save_mode() (
+    case "$1" in check|off) ;; auto)
+        [ -s "$STATE/release.pub" ] && [ -n "$(installed_version)" ] || {
+            echo 'Для автоустановки нужны установленная версия OWS и доверенный ключ релизов.' >&2
+            exit 1
+        } ;;
+        *) exit 2 ;;
+    esac
+    take_lock || { echo 'Обновление уже выполняется.' >&2; exit 1; }
+    mkdir -p "$STATE" && printf '%s\n' "$1" > "$STATE/mode.new" &&
+        mv -f "$STATE/mode.new" "$STATE/mode" && rm -f "$RUN/next"
+)
+
+request_update() (
+    local action=$1 expected=$2
+    case "$action" in
+        check) [ -z "$expected" ] || exit 2 ;;
+        install) ows_version_valid "$expected" || exit 2 ;;
+        *) exit 2 ;;
+    esac
+    take_lock && [ ! -e "$RUN/request" ] || { echo 'Запрос обновления уже выполняется.' >&2; exit 1; }
+    printf '%s %s\n' "$action" "$expected" > "$RUN/request.new" &&
+        mv -f "$RUN/request.new" "$RUN/request"
+)
+
+release_fetch() {
+    curl -q -fsSL --proto '=https' --proto-redir '=https' \
+        --connect-timeout 8 --max-time 60 --max-filesize "$1" -o "$2" "$3"
+}
+
+release_asset() {
+    local filename=$1 url
+    url="https://github.com/$REPO/releases/download/$tag/$filename"
+    jq -e --arg name "$filename" --arg url "$url" '
+        [.assets[]? | select(.name==$name and .browser_download_url==$url)] | length==1
+    ' "$work/release" >/dev/null || return 1
+    release_fetch "$2" "$3" "$url"
+}
+
+verify_release() {
+    local code version archive
+    code=$(curl -q -sSL --proto '=https' --proto-redir '=https' --connect-timeout 8 --max-time 25 \
+        --max-filesize 524288 -H 'Accept: application/vnd.github+json' -w '%{http_code}' \
+        -o "$work/release" "https://api.github.com/repos/$REPO/releases/latest") ||
+        update_fail error 'Не удалось связаться с GitHub.'
+    case "$code" in
+        200) ;;
+        404) write_state no_release 'В GitHub Releases пока нет стабильного релиза.'; exit 0 ;;
+        *) update_fail error 'GitHub не вернул данные релиза.' ;;
+    esac
+    tag=$(jq -er 'select(.draft==false and .prerelease==false) | .tag_name | strings' "$work/release") ||
+        update_fail error 'Некорректные данные стабильного релиза.'
+    version=${tag#v}
+    [ "$version" != "$tag" ] && ows_version_valid "$version" ||
+        update_fail error 'Ожидается тег стабильного релиза вида v1.2.3.'
+    archive="ows-$version.tar.gz"
+    release_asset ows-release.json 4096 "$work/manifest" &&
+        release_asset ows-release.json.sig 4096 "$work/signature" ||
+        update_fail error 'У релиза нет подписанного манифеста OWS.'
+
+    usign -V -q -m "$work/manifest" -x "$work/signature" -p "$STATE/release.pub" ||
+        update_fail error 'Подпись релиза не соответствует доверенному ключу.'
+    jq -e --arg repo "$REPO" --arg version "$version" --arg archive "$archive" --argjson max "$MAX_ARCHIVE" '
+        .schema==1 and .repository==$repo and .version==$version and .archive==$archive and
+        (.sha256 | type=="string" and length==64 and (explode|all((.>=48 and .<=57) or (.>=97 and .<=102)))) and
+        (.size | type=="number" and .>=1 and .<=$max and floor==.)
+    ' "$work/manifest" >/dev/null ||
+        update_fail error 'Подписанный манифест не совпадает с выбранным релизом.'
+    latest=$version
+}
+
+save_install_result() {
+    local result=$1 backup
+    backup=$(awk '/^OWS (upgraded|rollback complete|rollback incomplete)\. Backup: \/root\/ows-upgrade\.[A-Za-z0-9]+$/ {
+        path=$NF
+    } END {print path}' "$work/install.log")
+    if [ -z "$backup" ] && [ -s "$STATE/last-install.json" ]; then
+        backup=$(jq -r '.backup//""' "$STATE/last-install.json" 2>/dev/null) || backup=''
+    fi
+    mkdir -p "$STATE" || return 1
+    jq -nc --arg version "$latest" --arg result "$result" --arg backup "$backup" \
+        '{version:$version,result:$result,backup:$backup}' > "$STATE/last-install.new" &&
+        mv -f "$STATE/last-install.new" "$STATE/last-install.json"
+}
+
+install_release() {
+    local archive="ows-$latest.tar.gz" size expected_hash actual_hash prefix="ows-$latest/" root
+    write_state downloading 'Скачиваем и проверяем архив релиза.' || return 1
+    size=$(jq -er .size "$work/manifest") || update_fail error 'Размер релиза недоступен.'
+    release_asset "$archive" "$size" "$work/archive" || update_fail error 'Не удалось скачать архив OWS.'
+    expected_hash=$(jq -er .sha256 "$work/manifest") || update_fail error 'Контрольная сумма релиза недоступна.'
+    actual_hash=$(sha256sum "$work/archive") || update_fail error 'Не удалось вычислить SHA-256.'
+    [ "$(wc -c < "$work/archive")" -eq "$size" ] && [ "${actual_hash%% *}" = "$expected_hash" ] ||
+        update_fail error 'Размер или SHA-256 архива не совпали с подписанным манифестом.'
+
+    (ulimit -f 32768; gzip -dc "$work/archive" > "$work/release.tar") ||
+        update_fail error 'Архив повреждён или превышает предел распаковки.'
+    tar -tf "$work/release.tar" > "$work/paths" && tar -tvf "$work/release.tar" > "$work/types" ||
+        update_fail error 'Не удалось прочитать архив релиза.'
+    awk -v prefix="$prefix" '
+        {
+            if (index($0,prefix)!=1 || index($0,"//")) bad=1
+            n=split($0,parts,"/")
+            for (i=1;i<=n;i++) {
+                if (i==n && parts[i]=="") continue
+                if (parts[i]=="." || parts[i]==".." || parts[i]!~/^[A-Za-z0-9_.-]+$/) bad=1
+            }
+        }
+        END {exit !(NR>0 && !bad)}
+    ' "$work/paths" && awk 'substr($0,1,1)!="-" && substr($0,1,1)!="d" {bad=1} END{exit bad}' "$work/types" ||
+        update_fail error 'В архиве есть недопустимые пути или типы файлов.'
+    mkdir "$work/unpack" && tar -xf "$work/release.tar" -C "$work/unpack" ||
+        update_fail error 'Не удалось распаковать архив OWS.'
+    root="$work/unpack/ows-$latest"
+    [ -f "$root/install.sh" ] && [ -f "$root/VERSION" ] && [ "$(cat "$root/VERSION")" = "$latest" ] ||
+        update_fail error 'Версия внутри архива не совпала с релизом.'
+
+    if ! sh "$root/install.sh" --upgrade --check "--expect-version=$current" 8>&- > "$work/install.log" 2>&1; then
+        update_fail deferred "$(tail -n 1 "$work/install.log")"
+    fi
+    write_state installing 'Устанавливаем обновление OWS.' || return 1
+    if sh "$root/install.sh" --upgrade "--expect-version=$current" 8>&- > "$work/install.log" 2>&1; then
+        save_install_result installed || update_fail error 'Обновление завершилось, но не удалось сохранить отчёт.'
+        write_state installed 'Обновление установлено.'
+    else
+        save_install_result failed || :
+        update_fail error "$(tail -n 1 "$work/install.log")"
+    fi
+}
+
+run_update() (
+    local action=$1 expected=${2:-} mode work='' checked latest='' current tag last_failed
+    take_lock || return 1
+    if [ "$action" = request ]; then
+        [ -f "$RUN/request" ] || return 0
+        read -r action expected < "$RUN/request"
+        rm -f "$RUN/request" || return 1
+    fi
+    mode=$(update_mode)
+    if [ "$action" = scheduled ] && [ "$mode" = off ]; then return 0; fi
+    checked=$(date +%s)
+    printf '%s\n' "$((checked + INTERVAL))" > "$RUN/next"
+    [ -s "$STATE/release.pub" ] || update_fail missing_key 'Установите доверенный публичный ключ релизов OWS.'
+    for cmd in curl usign sha256sum tar gzip; do
+        command -v "$cmd" >/dev/null || update_fail missing_dependency "Для обновлений требуется утилита $cmd."
+    done
+    current=$(installed_version)
+    write_state checking 'Проверяем подпись последнего стабильного релиза.' || return 1
+    work=$(mktemp -d "$RUN/release.XXXXXX") || update_fail error 'Не удалось создать временный каталог обновления.'
+    trap 'rm -rf "$work"' EXIT
+    trap 'exit 1' HUP INT TERM
+    verify_release
+    [ -n "$current" ] || update_fail unknown_version 'Сначала установите версию OWS с поддержкой обновлений.'
+    if ! version_newer "$latest" "$current"; then
+        write_state current 'Уже установлена актуальная версия.'
+        exit
+    fi
+    write_state available 'Доступен подписанный релиз.' || return 1
+    case "$action:$mode" in
+        install:*) [ "$expected" = "$latest" ] ||
+            update_fail available 'На GitHub появился другой релиз. Проверьте и подтвердите версию заново.' ;;
+        scheduled:auto)
+            last_failed=$(jq -r 'select(.result=="failed")|.version' "$STATE/last-install.json" 2>/dev/null) || last_failed=''
+            if [ "$last_failed" = "$latest" ]; then
+                write_state available 'Автоустановка этой версии уже завершилась ошибкой. Доступен ручной повтор.'
+                exit
+            fi ;;
+        *) exit 0 ;;
+    esac
+    install_release
+)
+
+worker() {
+    local started='' version='' next now
+    update_directory || return 1
+    exec 9>"$RUN/worker.lock"
+    flock -n 9 || return 1
+    if [ -f /etc/ows/version ]; then IFS= read -r started < /etc/ows/version || :; fi
+    while :; do
+        version=''
+        if [ -f /etc/ows/version ]; then IFS= read -r version < /etc/ows/version || :; fi
+        if [ -n "$version" ] && [ "$started" != "$version" ]; then
+            exec 9>&-
+            exec /usr/sbin/ows-update worker
+        fi
+        if [ -s "$RUN/request" ]; then
+            run_update request 9>&- || :
+        else
+            next=0
+            if [ -f "$RUN/next" ]; then read -r next < "$RUN/next" || next=0; fi
+            now=$(date +%s)
+            if [ "$now" -ge "$next" ] && [ "$(update_mode)" != off ]; then
+                run_update scheduled 9>&- || :
+            fi
+        fi
+        sleep 5
+    done
+}
+
+[ "$(id -u)" = 0 ] || { echo 'Run ows-update as root.' >&2; exit 1; }
+if ! command -v jq >/dev/null; then
+    if [ "${1:-}" = status ]; then
+        echo '{"phase":"missing_dependency","message":"Для панели обновлений нужен jq"}'
+        exit 0
+    fi
+    echo 'Для обновлений нужен jq.' >&2
+    exit 1
+fi
+case "${1:-}" in
+    status) show_status ;;
+    check) run_update check ;;
+    install) ows_version_valid "${2:-}" && run_update install "$2" ;;
+    request) request_update "${2:-}" "${3:-}" ;;
+    mode) save_mode "${2:-}" ;;
+    worker) worker ;;
+    *) echo 'Usage: ows-update status | check | install VERSION | mode check|auto|off' >&2; exit 2 ;;
+esac
