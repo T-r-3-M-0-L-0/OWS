@@ -1,7 +1,7 @@
 {
   "luci-app-ows": {
     "description": "Manage OWS adapters and zapret2 tactic edits",
-    "read": { "ubus": { "ows": ["status", "job_status", "job_output", "catalog", "preview", "module_list", "module_status", "module_preview", "stgws_info", "tg_proxy_info", "steer_info", "vpn_state", "vpn_editor", "vpn_nodes", "vpn_list_page", "zapret_module_info", "zapret_constructor"] } },
-    "write": { "ubus": { "ows": ["apply_action", "module_attach", "module_link", "stgws_action", "tg_proxy_action", "steer_action", "vpn_action", "vpn_edit", "vpn_subscription_url", "zapret_module_action"] } }
+    "read": { "ubus": { "ows": ["status", "job_status", "job_output", "catalog", "preview", "module_list", "module_status", "module_preview", "stgws_info", "tg_proxy_info", "steer_info", "vpn_state", "vpn_editor", "vpn_nodes", "vpn_list_page", "zapret_module_info", "zapret_constructor", "zapret_presets", "zapret_preset_preview", "dns_info"] } },
+    "write": { "ubus": { "ows": ["apply_action", "module_attach", "module_link", "stgws_action", "tg_proxy_action", "steer_action", "vpn_action", "vpn_edit", "vpn_subscription_url", "zapret_module_action", "zapret_preset_write", "dns_check"] } }
   }
 }

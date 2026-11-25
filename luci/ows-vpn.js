@@ -13,7 +13,8 @@ return baseclass.extend({
     supports: function(entry, drivers) {
         return Object.prototype.hasOwnProperty.call(drivers, entry.id) && drivers[entry.id] === entry.service;
     },
-    tab: function(entry, createTabs, follow) {
+    tab: function(entry, createTabs, follow, template) {
+        template = template || {};
         var status = E('div');
         var subscriptions = E('div');
         var outputs = E('div');
@@ -265,12 +266,8 @@ return baseclass.extend({
         }
 
         function statusPanel(data, outputName, canDiagnose) {
-            if (entry.id === 'netshift') return [
-                E('p', {}, !data.installed ? _('NetShift не установлен') : data.running ?
-                    _('sing-box запущен, таблица NetShiftTable загружена') : _('NetShift не активен')),
-                E('p', {}, [_('Версия пакета'), ' · ', data.version || '—']),
-                canDiagnose ? button(_('Проверить состояние'), 'diagnose', true) : ''
-            ];
+            if (template.renderStatus) return template.renderStatus(data, { outputName: outputName,
+                canDiagnose: canDiagnose, button: button });
             var runtime = data.runtime || {};
             var summary = data.summary || {};
             var kinds = summary.list_kinds || {};
@@ -345,7 +342,9 @@ return baseclass.extend({
             var ui = data.ui || {};
             var hasSubscription = !!data.subscription || entries.some(function(item) { return item.subscription; });
             var handover = data.handover || {};
-            mountTabs(ui, abilities, hasSubscription, !!handover.ownership_transferred);
+            var native = template.native;
+            var showNative = !!(native && (!native.visible || native.visible(data)));
+            mountTabs(ui, abilities, hasSubscription, !!handover.ownership_transferred, showNative);
             status.replaceChildren.apply(status, statusPanel(data, outputName, abilities.diagnose));
             draftPanel(!!data.draft_apply);
             listActions.replaceChildren((abilities.refresh_live_lists || (abilities.refresh_live && handover.ownership_transferred)) ?
@@ -431,20 +430,17 @@ return baseclass.extend({
             );
         }
 
-        function mountTabs(ui, abilities, hasSubscription, migrated) {
+        function mountTabs(ui, abilities, hasSubscription, migrated, showNative) {
             configEditor.configure(ui, abilities);
             var migrationVisible = ui.migration === true && !migrated;
-            var layout = JSON.stringify([ui.editor || [], ui.plugins === true, migrationVisible, ui.write_mode, hasSubscription, ui.native]);
+            var layout = JSON.stringify([ui.editor || [], ui.plugins === true, migrationVisible, ui.write_mode, hasSubscription, showNative]);
             if (currentLayout === layout) return;
             currentLayout = layout;
             var sections = [{
                 id: prefix + 'status', label: hasSubscription ? _('Состояние и подписки') : _('Состояние'),
                 content: E('div', {}, [hasSubscription ? subscriptions : '', status, ui.plugins ? plugins : ''])
             }].concat(configEditor.tabs());
-            if (entry.id === 'netshift' && ui.native) sections.push(nativeView.tab({
-                id: prefix + 'native', route: 'netshift', acl: 'luci-app-netshift',
-                available: function() { return true; }
-            }));
+            if (showNative) sections.push(nativeView.tab(Object.assign({}, template.native, { id: prefix + 'native' })));
             if (migrationVisible) sections.push({id: prefix + 'migration', label: _('Перенос'), content: migration});
             tabsHost.replaceChildren(createTabs(_('Разделы VPN'), sections).content);
         }

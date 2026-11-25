@@ -2,48 +2,52 @@
 'require baseclass';
 'require rpc';
 
-var info = rpc.declare({ object: 'ows', method: 'tg_proxy_info' });
-var execute = rpc.declare({ object: 'ows', method: 'tg_proxy_action', params: ['action'] });
-
 return baseclass.extend({
-    tab: function(entry, follow) {
+    tab: function(entry, follow, template) {
+        var info = rpc.declare({ object: 'ows', method: template.statusMethod });
+        var execute = rpc.declare({ object: 'ows', method: template.actionMethod, params: ['action'] });
         var state = E('dl', {});
         var actions = E('div', { class: 'ows-actions' });
         var notice = E('p', { role: 'status' });
         var busy = false;
+        var pending;
         var service = {};
 
         function button(label, handler, disabled) {
             var node = E('button', { type: 'button', class: 'cbi-button' }, label);
-            node.disabled = disabled;
+            node.disabled = !!disabled;
             node.addEventListener('click', handler);
             return node;
         }
 
         function renderActions() {
             var disabled = busy || !service.installed;
-            actions.replaceChildren(
-                button(_('Обновить состояние'), load, busy),
-                button(_('Запустить'), function() { submit('start'); }, disabled || service.running),
-                button(_('Перезапустить'), function() { submit('restart'); }, disabled || !service.running),
-                button(_('Остановить'), function() { submit('stop'); }, disabled || !service.running)
-            );
+            var controls = template.actions.map(function(action) {
+                return button(action.label, function() { submit(action.id); }, disabled ||
+                    (action.enabled && !action.enabled(service)));
+            });
+            actions.replaceChildren.apply(actions, [button(_('Обновить состояние'), load, busy)].concat(controls));
         }
 
         function load() {
-            return info().then(function(data) {
+            if (pending) return pending;
+            pending = info().then(function(data) {
                 service = data;
                 if (data.error) notice.textContent = data.error;
-                state.replaceChildren(
-                    E('dt', {}, _('Служба')), E('dd', {}, !data.installed ? _('Служба не установлена') :
-                        data.running ? _('Прокси работает') : _('Прокси остановлен')),
-                    E('dt', {}, _('Пакет')), E('dd', {}, data.version || '—'),
-                    E('dt', {}, _('TCP-порт')), E('dd', {}, data.port == null ? '—' : String(data.port)),
-                    E('dt', {}, _('Автозапуск')), E('dd', {}, data.enabled ? _('Включён') : _('Выключен'))
-                );
+                var fields = template.fields.reduce(function(nodes, field) {
+                    var value = field.value(data);
+                    nodes.push(E('dt', {}, field.label), E('dd', {}, value == null || value === '' ? '—' : String(value)));
+                    return nodes;
+                }, []);
+                state.replaceChildren.apply(state, fields);
             }).catch(function() {
-                notice.textContent = _('Не удалось прочитать состояние прокси');
-            }).finally(renderActions);
+                service = {};
+                notice.textContent = template.readError || _('Не удалось прочитать состояние службы');
+            }).finally(function() {
+                pending = null;
+                renderActions();
+            });
+            return pending;
         }
 
         function submit(action) {

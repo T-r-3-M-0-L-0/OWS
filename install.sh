@@ -1,43 +1,90 @@
 #!/bin/sh
 set -eu
+umask 077
 
 SRC=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-check=0
-luci=0
+check=0 upgrade=0 luci=0
 for arg in "$@"; do
     case "$arg" in
         --check) check=1 ;;
+        --upgrade) upgrade=1 ;;
         --luci) luci=1 ;;
-        *) echo 'Usage: sh install.sh [--check] [--luci]' >&2; exit 2 ;;
+        *) echo 'Usage: sh install.sh [--check] [--upgrade] [--luci]' >&2; exit 2 ;;
     esac
 done
 fail() { echo "$*" >&2; exit 1; }
 
+upgrade_ready() {
+    [ "$upgrade" = 1 ] || return 0
+    for ticket in /tmp/ows/queue/*; do
+        [ ! -f "$ticket" ] || fail 'Wait for OWS jobs to finish before upgrading'
+    done
+    [ ! -d /etc/ows/pending ] || fail 'Resolve pending Zapret2 recovery before upgrading'
+}
+
+file_list() {
+    cat <<'FILES'
+adapters/zapret2.sh /usr/lib/ows/zapret2.sh 644
+adapters/zapret-module.sh /usr/lib/ows/zapret-module.sh 644
+adapters/zapret-constructor.sh /usr/lib/ows/zapret-constructor.sh 644
+adapters/zapret-presets.sh /usr/lib/ows/zapret-presets.sh 644
+adapters/dns.sh /usr/lib/ows/dns.sh 644
+adapters/stgws.sh /usr/lib/ows/stgws.sh 644
+adapters/netshift.sh /usr/lib/ows/netshift.sh 644
+adapters/tg-ws-proxy.sh /usr/lib/ows/tg-ws-proxy.sh 644
+adapters/steer.sh /usr/lib/ows/steer.sh 644
+adapters/steer-migration.sh /usr/lib/ows/steer-migration.sh 644
+adapters/steer-editor.sh /usr/lib/ows/steer-editor.sh 644
+adapters/steer-handover.sh /usr/lib/ows/steer-handover.sh 644
+adapters/steer-live.sh /usr/lib/ows/steer-live.sh 644
+adapters/steer-catalog.sh /usr/lib/ows/steer-catalog.sh 644
+adapters/steer-sources.sh /usr/lib/ows/steer-sources.sh 644
+adapters/steer-apply.sh /usr/lib/ows/steer-apply.sh 644
+adapters/steer-merge.jq /usr/lib/ows/steer-merge.jq 644
+adapters/steer-edit.jq /usr/lib/ows/steer-edit.jq 644
+adapters/steer-outputs.json /usr/lib/ows/steer-outputs.json 644
+adapters/vpn.sh /usr/lib/ows/vpn.sh 644
+openwrt/stgws-route.sh /usr/lib/ows/stgws-route.sh 644
+bin/ows /usr/sbin/ows 755
+openwrt/ows.init /etc/init.d/ows 755
+FILES
+    if [ "$luci" = 1 ]; then
+        cat <<'FILES'
+adapters/zapret2-editor.sh /usr/lib/ows/zapret2-editor.sh 644
+adapters/registry.sh /usr/lib/ows/registry.sh 644
+openwrt/ows.rpc /usr/libexec/rpcd/ows 755
+luci/acl.json /usr/share/rpcd/acl.d/luci-app-ows.json 644
+luci/menu.json /usr/share/luci/menu.d/luci-app-ows.json 644
+luci/ows.js /www/luci-static/resources/view/ows-services.js 644
+luci/ows-stgws.js /www/luci-static/resources/view/ows-stgws.js 644
+luci/ows-service.js /www/luci-static/resources/view/ows-service.js 644
+luci/ows-templates.js /www/luci-static/resources/view/ows-templates.js 644
+luci/ows-template-overrides.js /www/luci-static/resources/view/ows-template-overrides.js keep
+luci/ows-vpn.js /www/luci-static/resources/view/ows-vpn-panel.js 644
+luci/ows-vpn-editor.js /www/luci-static/resources/view/ows-vpn-editor.js 644
+luci/ows-zapret.js /www/luci-static/resources/view/ows-zapret.js 644
+luci/ows-zapret-tools.js /www/luci-static/resources/view/ows-zapret-tools.js 644
+luci/ows-dns.js /www/luci-static/resources/view/ows-dns.js 644
+luci/ows-native.js /www/luci-static/resources/view/ows-native.js 644
+luci/ows.css /www/luci-static/resources/view/ows-services.css 644
+luci/menu-zapret2.json /usr/share/luci/menu.d/zz-luci-app-ows-zapret2.json 644
+FILES
+    fi
+}
+
 [ "$(id -u)" = 0 ] || fail 'Install as root'
 [ -x /etc/rc.common ] || fail 'OpenWrt init system is required'
-for cmd in uci flock pgrep cmp mktemp dd sha256sum; do
+for cmd in uci flock pgrep cmp mktemp dd sha256sum tail; do
     command -v "$cmd" >/dev/null || fail "Missing dependency: $cmd"
 done
-for path in bin/ows adapters/zapret2.sh openwrt/ows.init; do sh -n "$SRC/$path"; done
-sh -n "$SRC/adapters/stgws.sh"
-sh -n "$SRC/adapters/netshift.sh"
-sh -n "$SRC/adapters/tg-ws-proxy.sh"
-sh -n "$SRC/adapters/zapret-module.sh"
-sh -n "$SRC/adapters/zapret-constructor.sh"
-sh -n "$SRC/adapters/steer.sh"
-sh -n "$SRC/adapters/steer-migration.sh"
-sh -n "$SRC/adapters/steer-editor.sh"
-sh -n "$SRC/adapters/steer-handover.sh"
-sh -n "$SRC/adapters/steer-live.sh"
-sh -n "$SRC/adapters/steer-catalog.sh"
-sh -n "$SRC/adapters/steer-sources.sh"
-sh -n "$SRC/adapters/steer-apply.sh"
-[ -s "$SRC/adapters/steer-edit.jq" ] || fail 'Missing steer settings compiler'
-[ -s "$SRC/adapters/steer-outputs.json" ] || fail 'Missing steer output labels'
-[ -s "$SRC/adapters/steer-merge.jq" ] || fail 'Missing steer merge'
-sh -n "$SRC/adapters/vpn.sh"
-sh -n "$SRC/openwrt/stgws-route.sh"
-set -- /usr/sbin/ows /usr/lib/ows /etc/init.d/ows /etc/ows
+if [ "$upgrade" = 1 ]; then
+    [ -x /usr/sbin/ows ] && [ -x /etc/init.d/ows ] && [ -d /etc/ows ] ||
+        fail 'OWS must be installed before upgrading'
+    if [ -e /usr/libexec/rpcd/ows ]; then luci=1; fi
+else
+    [ ! -e /etc/ows ] && [ ! -L /etc/ows ] &&
+        [ ! -e /usr/lib/ows ] && [ ! -L /usr/lib/ows ] || fail 'OWS data or libraries already exist'
+fi
 if [ "$luci" = 1 ]; then
     [ -r /usr/share/libubox/jshn.sh ] || fail 'Missing dependency: jshn'
     [ -x /etc/init.d/rpcd ] || fail 'LuCI requires the rpcd service'
@@ -45,76 +92,135 @@ if [ "$luci" = 1 ]; then
     for dir in /usr/libexec/rpcd /usr/share/rpcd/acl.d /usr/share/luci/menu.d /www/luci-static/resources/view; do
         [ -d "$dir" ] || fail "LuCI directory missing: $dir"
     done
-    sh -n "$SRC/openwrt/ows.rpc"
-    sh -n "$SRC/adapters/zapret2-editor.sh"
-    sh -n "$SRC/adapters/registry.sh"
-    for path in luci/ows.js luci/ows-stgws.js luci/ows-tg-proxy.js luci/ows-vpn.js luci/ows-vpn-editor.js luci/ows-zapret.js luci/ows-native.js luci/ows.css luci/menu.json luci/menu-zapret2.json luci/acl.json; do [ -s "$SRC/$path" ] || fail "Missing $path"; done
-    set -- "$@" /usr/libexec/rpcd/ows /usr/share/rpcd/acl.d/luci-app-ows.json \
-        /usr/share/luci/menu.d/luci-app-ows.json /www/luci-static/resources/view/ows-services.js \
-        /www/luci-static/resources/view/ows-services.css /www/luci-static/resources/view/ows-stgws.js \
-        /www/luci-static/resources/view/ows-tg-proxy.js \
-        /www/luci-static/resources/view/ows-vpn-panel.js /www/luci-static/resources/view/ows-vpn-editor.js \
-        /www/luci-static/resources/view/ows-zapret.js /www/luci-static/resources/view/ows-native.js \
-        /usr/share/luci/menu.d/zz-luci-app-ows-zapret2.json
 fi
-for path in "$@"; do
-    [ ! -e "$path" ] && [ ! -L "$path" ] || fail "Already exists: $path"
-done
-if [ "$check" = 1 ]; then echo 'OWS preflight OK'; exit 0; fi
 
-put() {
-    cp "$SRC/$1" "$2"
-    chmod "$3" "$2"
-}
+files=$(file_list)
+while read -r source path mode; do
+    [ -s "$SRC/$source" ] || fail "Missing $source"
+    case "$source" in *.sh|*.init|*.rpc|bin/ows) sh -n "$SRC/$source" || exit 1 ;; esac
+    if [ "$mode" = keep ]; then continue; fi
+    if [ -L "$path" ] || { [ -e "$path" ] && { [ "$upgrade" = 0 ] || [ ! -f "$path" ]; }; }; then
+        fail "Unexpected existing path: $path"
+    fi
+done <<EOF
+$files
+EOF
+[ ! -L /etc/ows ] && [ ! -L /usr/lib/ows ] || fail 'OWS directories must not be symlinks'
+upgrade_ready
+[ "$check" = 0 ] || { echo 'OWS preflight OK'; exit 0; }
 
-mkdir -m 700 /etc/ows
-mkdir /usr/lib/ows
-put adapters/zapret2.sh /usr/lib/ows/zapret2.sh 644
-put adapters/zapret-module.sh /usr/lib/ows/zapret-module.sh 644
-put adapters/zapret-constructor.sh /usr/lib/ows/zapret-constructor.sh 644
-put adapters/stgws.sh /usr/lib/ows/stgws.sh 644
-put adapters/netshift.sh /usr/lib/ows/netshift.sh 644
-put adapters/tg-ws-proxy.sh /usr/lib/ows/tg-ws-proxy.sh 644
-put adapters/steer.sh /usr/lib/ows/steer.sh 644
-put adapters/steer-migration.sh /usr/lib/ows/steer-migration.sh 644
-put adapters/steer-editor.sh /usr/lib/ows/steer-editor.sh 644
-put adapters/steer-handover.sh /usr/lib/ows/steer-handover.sh 644
-put adapters/steer-live.sh /usr/lib/ows/steer-live.sh 644
-put adapters/steer-catalog.sh /usr/lib/ows/steer-catalog.sh 644
-put adapters/steer-sources.sh /usr/lib/ows/steer-sources.sh 644
-put adapters/steer-apply.sh /usr/lib/ows/steer-apply.sh 644
-put adapters/steer-merge.jq /usr/lib/ows/steer-merge.jq 644
-put adapters/steer-edit.jq /usr/lib/ows/steer-edit.jq 644
-put adapters/steer-outputs.json /usr/lib/ows/steer-outputs.json 644
-put adapters/vpn.sh /usr/lib/ows/vpn.sh 644
-put openwrt/stgws-route.sh /usr/lib/ows/stgws-route.sh 644
-put bin/ows /usr/sbin/ows 755
-put openwrt/ows.init /etc/init.d/ows 755
-if [ "$luci" = 1 ]; then
-    put adapters/zapret2-editor.sh /usr/lib/ows/zapret2-editor.sh 644
-    put adapters/registry.sh /usr/lib/ows/registry.sh 644
-    put openwrt/ows.rpc /usr/libexec/rpcd/ows 755
-    put luci/acl.json /usr/share/rpcd/acl.d/luci-app-ows.json 644
-    put luci/menu.json /usr/share/luci/menu.d/luci-app-ows.json 644
-    put luci/ows.js /www/luci-static/resources/view/ows-services.js 644
-    put luci/ows-stgws.js /www/luci-static/resources/view/ows-stgws.js 644
-    put luci/ows-tg-proxy.js /www/luci-static/resources/view/ows-tg-proxy.js 644
-    put luci/ows-vpn.js /www/luci-static/resources/view/ows-vpn-panel.js 644
-    put luci/ows-vpn-editor.js /www/luci-static/resources/view/ows-vpn-editor.js 644
-    put luci/ows-zapret.js /www/luci-static/resources/view/ows-zapret.js 644
-    put luci/ows-native.js /www/luci-static/resources/view/ows-native.js 644
-    put luci/ows.css /www/luci-static/resources/view/ows-services.css 644
-    put luci/menu-zapret2.json /usr/share/luci/menu.d/zz-luci-app-ows-zapret2.json 644
-fi
-/etc/init.d/ows enable
-/etc/init.d/ows start
-if [ "$luci" = 1 ]; then
-    /etc/init.d/rpcd reload || fail 'OWS files installed, but rpcd reload failed'
-    attempts=0
-    until [ "$(ubus -S list ows 2>/dev/null)" = ows ]; do
-        attempts=$((attempts + 1))
-        [ "$attempts" -lt 5 ] || fail 'OWS files installed, but rpcd has not registered the ows object'
+exec 7>/var/lock/ows-install.lock
+flock -n 7 || fail 'Another OWS installation is running'
+mkdir -p /tmp/ows
+exec 8>/tmp/ows/submit.lock
+flock -n 8 || fail 'OWS is receiving a job'
+upgrade_ready
+
+backup=$(mktemp -d /root/ows-upgrade.XXXXXX)
+touched=$backup/changed
+: > "$touched"
+was_running=0 enabled_here=0 service_touched=0 library_created=0 state_created=0
+if [ "$upgrade" = 1 ] && /etc/init.d/ows status 7>&- 8>&- >/dev/null 2>&1; then was_running=1; fi
+
+atomic_copy() (
+    local source=$1 path=$2 mode=$3 temp
+    temp=$(mktemp "$path.ows.XXXXXX") || exit 1
+    trap 'rm -f "$temp"' EXIT
+    if [ "$mode" = restore ]; then
+        cp -p "$source" "$temp" || exit 1
+    else
+        cp "$source" "$temp" && chmod "$mode" "$temp" || exit 1
+    fi
+    mv -f "$temp" "$path"
+)
+
+activate_rpc() {
+    /etc/init.d/rpcd reload 7>&- 8>&- || return 1
+    for attempt in 1 2 3 4 5; do
+        [ "$(ubus -S list ows 2>/dev/null)" != ows ] || return 0
         sleep 1
     done
+    return 1
+}
+
+rollback() {
+    local status=$? broken=0 path
+    trap - EXIT HUP INT TERM
+    [ "$status" != 0 ] || return 0
+    if [ "$service_touched" = 1 ] && [ -x /etc/init.d/ows ]; then
+        /etc/init.d/ows stop 7>&- 8>&- || broken=1
+    fi
+    if [ "$enabled_here" = 1 ]; then /etc/init.d/ows disable 7>&- 8>&- || broken=1; fi
+    while IFS= read -r path; do
+        if [ -f "$backup$path" ]; then
+            atomic_copy "$backup$path" "$path" restore || broken=1
+        else
+            rm -f "$path" || broken=1
+        fi
+    done < "$touched"
+    if [ "$library_created" = 1 ]; then rmdir /usr/lib/ows || broken=1; fi
+    if [ "$state_created" = 1 ]; then rmdir /etc/ows || broken=1; fi
+    if [ "$luci" = 1 ]; then /etc/init.d/rpcd reload 7>&- 8>&- || broken=1; fi
+    if [ "$was_running" = 1 ] && [ "$service_touched" = 1 ]; then
+        /etc/init.d/ows start 7>&- 8>&- || broken=1
+    fi
+    if [ "$broken" = 1 ]; then
+        echo "OWS rollback incomplete. Backup: $backup" >&2
+    else
+        echo "OWS rollback complete. Backup: $backup" >&2
+    fi
+    exit "$status"
+}
+trap rollback EXIT
+trap 'exit 1' HUP INT TERM
+
+if [ "$upgrade" = 1 ]; then
+    while read -r source path mode; do
+        if [ "$mode" != keep ] && [ -f "$path" ]; then
+            mkdir -p "$backup$(dirname "$path")"
+            cp -p "$path" "$backup$path"
+        fi
+    done <<EOF
+$files
+EOF
+else
+    mkdir /etc/ows
+    state_created=1
 fi
-echo 'OWS installed'
+if [ ! -d /usr/lib/ows ]; then mkdir /usr/lib/ows; library_created=1; fi
+if [ "$was_running" = 1 ]; then
+    service_touched=1
+    /etc/init.d/ows stop 7>&- 8>&-
+fi
+while read -r source path mode; do
+    if [ "$mode" = keep ]; then
+        if [ -e "$path" ] || [ -L "$path" ]; then continue; fi
+        mode=644
+    fi
+    printf '%s\n' "$path" >> "$touched"
+    atomic_copy "$SRC/$source" "$path" "$mode"
+done <<EOF
+$files
+EOF
+if [ "$upgrade" = 0 ]; then
+    enabled_here=1
+    /etc/init.d/ows enable 7>&- 8>&-
+fi
+if [ "$luci" = 1 ]; then activate_rpc; fi
+if [ "$was_running" = 1 ] || [ "$upgrade" = 0 ]; then
+    service_touched=1
+    /etc/init.d/ows start 7>&- 8>&-
+    for attempt in 1 2 3 4 5; do
+        if /etc/init.d/ows status 7>&- 8>&- >/dev/null 2>&1; then break; fi
+        sleep 1
+    done
+    /etc/init.d/ows status 7>&- 8>&- >/dev/null 2>&1 || fail 'OWS worker did not start'
+fi
+trap - EXIT HUP INT TERM
+if [ "$upgrade" = 1 ]; then
+    echo "OWS upgraded. Backup: $backup"
+else
+    rm -f "$touched"
+    rmdir "$backup"
+    echo 'OWS installed'
+fi

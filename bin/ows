@@ -16,8 +16,8 @@ publish() {
     printf '{"job":"%s","phase":"%s","updated":%s}\n' "$1" "$2" "$(date +%s)" > "$JOBS/$1/status.new" &&
         mv "$JOBS/$1/status.new" "$JOBS/$1/status.json" &&
         printf '%s %s\n' "$(date +%s)" "$2" >> "$JOBS/$1/events" &&
-        cp "$JOBS/$1/status.json" "$RUN/latest.new" &&
-        mv "$RUN/latest.new" "$RUN/latest.json"
+        cp "$JOBS/$1/status.json" "$RUN/latest.$1.new" &&
+        mv "$RUN/latest.$1.new" "$RUN/latest.json"
 }
 
 critical() {
@@ -45,6 +45,9 @@ enqueue() (
         tg-ws-proxy)
             . "$LIB/tg-ws-proxy.sh"
             [ "$#" = 1 ] && tgws_proxy_action_allowed "$1" || fail 'Unknown Telegram proxy action'
+            ;;
+        dns)
+            [ "$#" = 1 ] && [ "$1" = check ] || fail 'Unknown DNS action'
             ;;
         zapret-module)
             . "$LIB/zapret-module.sh"
@@ -122,15 +125,20 @@ recover() {
     fi
 }
 
-process() {
+process() (
     id=$1
     job=$JOBS/$id
+    exec 5>/var/lock/zapret2-health.lock
+    if ! flock -n 5; then
+        publish "$id" config_busy
+        return
+    fi
     publish "$id" validating || return 1
     if ! config_current "$job"; then
         publish "$id" config_changed
         return
     fi
-    if ! validate_config "$job"; then
+    if ! validate_config "$job" > "$job/output" 2>&1; then
         publish "$id" invalid_config
         return
     fi
@@ -146,7 +154,7 @@ process() {
     fi
     publish "$id" rolling_back || return 1
     recover
-}
+)
 
 process_module() {
     local id=$1 kind=$2 result outcome action
@@ -155,25 +163,33 @@ process_module() {
     outcome=0
     action=$(cat "$JOBS/$id/action") || return 1
     (
-        export OWS_JOB_RESULT="$JOBS/$id/result.json"
-        case "$kind" in
-            stgws) stgws_execute "$action" ;;
-            tg-ws-proxy)
-                . "$LIB/tg-ws-proxy.sh"
-                tgws_proxy_execute "$action"
-                ;;
-            zapret-module)
-                . "$LIB/zapret-module.sh"
-                . "$LIB/zapret-constructor.sh"
-                zapret_module_execute "$action"
-                ;;
-            *)
-                . "$LIB/vpn.sh"
-                ows_vpn_load "$kind" "$LIB" || exit 1
-                "${kind}_execute" "$action" "$JOBS/$id/payload"
-                ;;
-        esac
-    ) > "$JOBS/$id/output" 2>&1 9>&- || outcome=$?
+        (
+            export OWS_JOB_RESULT="$JOBS/$id/result.json"
+            case "$kind" in
+                stgws) stgws_execute "$action" ;;
+                tg-ws-proxy)
+                    . "$LIB/tg-ws-proxy.sh"
+                    tgws_proxy_execute "$action"
+                    ;;
+                dns)
+                    . "$LIB/dns.sh"
+                    ows_dns_check
+                    ;;
+                zapret-module)
+                    . "$LIB/zapret-module.sh"
+                    . "$LIB/zapret-constructor.sh"
+                    zapret_module_execute "$action"
+                    ;;
+                *)
+                    . "$LIB/vpn.sh"
+                    ows_vpn_load "$kind" "$LIB" || exit 1
+                    "${kind}_execute" "$action" "$JOBS/$id/payload"
+                    ;;
+            esac
+        ) 6>&- || outcome=$?
+        printf '%s\n' "$outcome" > "$JOBS/$id/exit"
+    ) 2>&1 9>&- | tail -c 8192 > "$JOBS/$id/output" || return 1
+    outcome=$(cat "$JOBS/$id/exit") || return 1
     case "$outcome" in
         0) ;;
         3) result=rollback_failed; critical "$id" rollback_failed ;;
@@ -181,6 +197,46 @@ process_module() {
     esac
     publish "$id" "$result" || return 1
     [ "$outcome" != 3 ]
+}
+
+diagnostic_job() {
+    case "$1" in dns|netshift|tg-ws-proxy) ;; *) return 1 ;; esac
+    case "$1:$(cat "$JOBS/$2/action" 2>/dev/null)" in
+        dns:check|netshift:diag|tg-ws-proxy:check) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+process_diagnostic() (
+    local id=$1 kind=$2 phase
+    exec 6>"$RUN/diagnostic.lock"
+    flock -n 6 || exit 0
+    [ -f "$QUEUE/$id" ] || exit 0
+    phase=$(cat "$JOBS/$id/status.json" 2>/dev/null || :)
+    case "$phase" in
+        *'"phase":"queued"'*) process_module "$id" "$kind" || exit 1 ;;
+        *'"phase":"done"'*|*'"phase":"operation_failed"'*|*'"phase":"interrupted"'*) ;;
+        *) publish "$id" interrupted || exit 1 ;;
+    esac
+    rm -f "$QUEUE/$id"
+)
+
+diagnostic_worker() {
+    local ticket id kind
+    prepare
+    exec 9>"$RUN/diagnostic-worker.lock"
+    flock -n 9 || fail 'Diagnostic worker already running'
+    while :; do
+        for ticket in "$QUEUE"/*; do
+            [ -f "$ticket" ] || continue
+            id=${ticket##*/}
+            kind=$(cat "$JOBS/$id/kind" 2>/dev/null || :)
+            if diagnostic_job "$kind" "$id"; then
+                process_diagnostic "$id" "$kind" 9>&- || return 1
+            fi
+        done
+        sleep 3
+    done
 }
 
 worker() {
@@ -195,20 +251,27 @@ worker() {
     if [ -r "$LIB/vpn.sh" ]; then
         ( . "$LIB/vpn.sh"; ows_vpn_recover "$LIB" ) || fail 'Pending VPN transaction needs recovery'
     fi
+    local cutoff remaining
     while :; do
         for ticket in "$QUEUE"/*; do
             [ -f "$ticket" ] || break
             id=${ticket##*/}
+            kind=$(cat "$JOBS/$id/kind" 2>/dev/null || :)
+            if diagnostic_job "$kind" "$id"; then
+                if [ "${1:-}" = --once ]; then
+                    process_diagnostic "$id" "$kind" 9>&-
+                fi
+                continue
+            fi
             phase=$(cat "$JOBS/$id/status.json" 2>/dev/null || :)
             case "$phase" in
                 *'"phase":"queued"'*)
-                    kind=$(cat "$JOBS/$id/kind" 2>/dev/null || :)
                     case "$kind" in
                         zapret2|'') process "$id" || return 1 ;;
                         *) process_module "$id" "$kind" || return 1 ;;
                     esac
                     ;;
-                *'"phase":"applied"'*|*'"phase":"rolled_back"'*|*'"phase":"invalid_config"'*|*'"phase":"snapshot_failed"'*|*'"phase":"config_changed"'*|*'"phase":"done"'*|*'"phase":"operation_failed"'*|*'"phase":"rollback_failed"'*) ;;
+                *'"phase":"applied"'*|*'"phase":"rolled_back"'*|*'"phase":"invalid_config"'*|*'"phase":"snapshot_failed"'*|*'"phase":"config_changed"'*|*'"phase":"config_busy"'*|*'"phase":"done"'*|*'"phase":"operation_failed"'*|*'"phase":"rollback_failed"'*) ;;
                 *) publish "$id" interrupted ;;
             esac
             rm -f "$ticket" "$JOBS/$id/candidate" "$JOBS/$id/payload"
@@ -219,12 +282,15 @@ worker() {
             next_stgws_tick=$(($(date +%s) + 60))
         fi
         if [ "$(date +%s)" -ge "${next_cleanup:-0}" ]; then
-            for path in "$JOBS"/*; do
+            cutoff=$(($(date +%s) - 86400))
+            remaining=0
+            for path in $(printf '%s\n' "$JOBS"/* | sort -r); do
                 [ -d "$path" ] || break
                 [ -f "$QUEUE/${path##*/}" ] && continue
                 timestamp=${path##*-}
                 case "$timestamp" in ''|*[!0-9]*) continue ;; esac
-                [ "$timestamp" -ge "$(($(date +%s) - 86400))" ] || rm -rf "$path"
+                remaining=$((remaining + 1))
+                [ "$timestamp" -ge "$cutoff" ] && [ "$remaining" -le 100 ] || rm -rf "$path"
             done
             next_cleanup=$(($(date +%s) + 300))
         fi
@@ -237,7 +303,11 @@ case "${1:-}" in
     zapret) shift; enqueue zapret-module "$@" ;;
     stgws) shift; enqueue stgws "$@" ;;
     tg-ws-proxy) shift; enqueue tg-ws-proxy "$@" ;;
-    worker) shift; worker "$@" ;;
+    dns-check) shift; [ "$#" = 0 ] || fail 'Usage: ows dns-check'; enqueue dns check ;;
+    worker)
+        shift
+        if [ "${1:-}" = --diagnostic ]; then diagnostic_worker; else worker "$@"; fi
+        ;;
     status|log|output)
         if [ "${1:-}" = status ] && [ "$#" = 1 ]; then
             if [ -r "$RUN/latest.json" ]; then cat "$RUN/latest.json"; else echo '{"phase":"idle"}'; fi

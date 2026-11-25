@@ -2,6 +2,7 @@
 
 CONFIG=/etc/config/zapret2
 SERVICE=/etc/init.d/zapret2
+GENERATOR=/opt/zapret2/init.d/openwrt/uci2config
 
 config_revision() {
     digest=$(sha256sum "$1") || return 1
@@ -19,10 +20,29 @@ validate_config() (
     [ -z "$changes" ] || exit 1
     stage=$(mktemp -d "$1/validate.XXXXXX") || exit 1
     trap 'rm -rf "$stage"' EXIT
-    mkdir "$stage/delta"
+    mkdir "$stage/delta" "$stage/override"
     cp "$1/candidate" "$stage/zapret2"
-    parsed=$(uci -q -c "$stage" -t "$stage/delta" show zapret2) && [ -n "$parsed" ]
+    parsed=$(uci -q -c "$stage" -C "$stage/override" -t "$stage/delta" show zapret2) && [ -n "$parsed" ] || exit 1
+    # Older generators do not support an isolated UCI input and output.
+    [ -r "$GENERATOR" ] && grep -q 'UCI_CONFIG_DIR' "$GENERATOR" &&
+        grep -q 'ZAPRET_BASE' "$GENERATOR" && grep -q -- '--check' "$GENERATOR" || {
+        echo 'Требуется генератор Zapret2 с поддержкой изолированной проверки.' >&2
+        exit 1
+    }
+    mkdir "$stage/engine"
+    cp /opt/zapret2/config "$stage/engine/config" || exit 1
+    UCI_CONFIG_DIR="$stage" ZAPRET_BASE="$stage/engine" sh "$GENERATOR" --check 9>&-
 )
+
+zapret_dns_ready() {
+    command -v nslookup >/dev/null &&
+        nslookup example.org 127.0.0.1 2>/dev/null | grep -q '^Name:'
+}
+
+zapret_https_ready() {
+    command -v curl >/dev/null &&
+        curl -fsS -o /dev/null --connect-timeout 3 --max-time 5 https://example.org/
+}
 
 save_snapshot() (
     tmp=$(mktemp -d "$STATE/snapshot.XXXXXX") || exit 1
@@ -31,8 +51,10 @@ save_snapshot() (
     cp -p "$CONFIG" "$tmp/previous" &&
         { [ -z "$revision" ] || [ "$revision" = "$(config_revision "$tmp/previous")" ]; } &&
         cp "$1/candidate" "$tmp/candidate" &&
-        printf '%s\n' "$2" > "$tmp/job" &&
-        mv "$tmp" "$3"
+        printf '%s\n' "$2" > "$tmp/job" || exit 1
+    if zapret_dns_ready 9>&-; then : > "$tmp/check-dns"; fi
+    if zapret_https_ready 9>&-; then : > "$tmp/check-https"; fi
+    mv "$tmp" "$3"
 )
 
 write_config() (
@@ -42,10 +64,20 @@ write_config() (
 )
 
 restart_and_verify() {
-    "$SERVICE" restart 9>&- >/dev/null 2>&1 || return 1
+    local config active delay
+    config=$(uci -q show zapret2) || return 1
+    active=$(printf '%s\n' "$config" | awk -F= '
+        $2=="strategy" {strategy[$1]=1}
+        $1~/\.enabled$/ {sub(/\.enabled$/,"",$1); gsub(/\047/,"",$2); enabled[$1]=$2}
+        END {for (key in strategy) if (!(key in enabled) || enabled[key]~/^(1|on|yes|true|enabled)$/) n++; print n+0}
+    ')
+    "$SERVICE" restart 5>&- 9>&- >/dev/null 2>&1 || return 1
     for delay in 1 2 3 4 5; do
         sleep 1
-        if "$SERVICE" status 9>&- >/dev/null 2>&1 && pgrep -x nfqws2 >/dev/null; then
+        if [ "$active" -eq 0 ] ||
+            { "$SERVICE" status 5>&- 9>&- >/dev/null 2>&1 && pgrep -x nfqws2 >/dev/null; }; then
+            if [ -f "$1/check-dns" ] && ! zapret_dns_ready 9>&-; then continue; fi
+            if [ -f "$1/check-https" ] && ! zapret_https_ready 9>&-; then continue; fi
             return 0
         fi
     done
@@ -55,14 +87,14 @@ restart_and_verify() {
 apply_config() {
     cmp -s "$CONFIG" "$1/previous" &&
         write_config "$1/candidate" &&
-        restart_and_verify
+        restart_and_verify "$1"
 }
 
 restore_config() {
     if cmp -s "$CONFIG" "$1/previous"; then
-        restart_and_verify
+        restart_and_verify "$1"
     elif cmp -s "$CONFIG" "$1/candidate"; then
-        write_config "$1/previous" && restart_and_verify
+        write_config "$1/previous" && restart_and_verify "$1"
     else
         return 1
     fi
