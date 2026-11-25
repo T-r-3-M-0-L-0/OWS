@@ -5,9 +5,10 @@
 'require request';
 'require session';
 'require ui';
-'require view.ows-stgws as stgws';
-'require view.ows-vpn-panel as vpn';
+'require view.ows-templates as templates';
 'require view.ows-zapret as zapret';
+'require view.ows-zapret-tools as zapretTools';
+'require view.ows-dns as dns';
 
 var status = rpc.declare({ object: 'ows', method: 'status' });
 var jobStatus = rpc.declare({ object: 'ows', method: 'job_status', params: ['job'] });
@@ -30,6 +31,7 @@ var labels = {
     applied: _('Применено'),
     invalid_config: _('Проверка конфигурации не пройдена'),
     config_changed: _('Конфигурация изменилась. Обновите редактор'),
+    config_busy: _('Идёт проверка Zapret2 по расписанию'),
     snapshot_failed: _('Не удалось создать снимок'),
     rolling_back: _('Откат'),
     rolled_back: _('Предыдущая конфигурация восстановлена'),
@@ -52,17 +54,23 @@ var stgwsActions = {
     remove: _('Удаление пакета')
 };
 
-function statusLabel(result) {
+function statusLabel(result, template) {
     var label = labels[result.phase] || _('Статус неизвестен');
+    if (template && template.jobActions && Object.prototype.hasOwnProperty.call(template.jobActions, result.action)) {
+        return (template.jobName || result.kind) + ' · ' + template.jobActions[result.action] + ' · ' + label;
+    }
     if (result.kind === 'zapret-module') {
         var parts = (result.action || '').split(':');
         var operation = {
             download:_('Скачивание пакетов'), install:_('Установка пакетов'),
             start:_('Запуск'), stop:_('Остановка'), restart:_('Перезапуск'),
-            enable:_('Включение автозапуска'), disable:_('Выключение автозапуска')
+            enable:_('Включение автозапуска'), disable:_('Выключение автозапуска'),
+            'compare-start':_('Сравнение стратегий'), 'compare-stop':_('Остановка сравнения'),
+            'schedule-set':_('Настройка расписания')
         }[parts[1]] || _('Конструктор');
         return (parts[0] === 'zapret2' ? 'Zapret2' : 'Zapret') + ' · ' + operation + ' · ' + label;
     }
+    if (result.kind === 'dns') return _('Проверка DNS') + ' · ' + label;
     if (result.kind && result.kind !== 'stgws' && result.kind !== 'zapret2') {
         var operation = result.action === 'diag' ? _('Диагностика') :
             result.action === 'prepare-migration' ? _('Подготовка переноса') :
@@ -275,7 +283,8 @@ function adapterCatalog(onChange) {
                 });
                 previewPane.replaceChildren(
                     E('h4', {}, result.name),
-                    E('p', {}, [result.version, ' · ', E('code', {}, result.service)]),
+                    E('p', {}, [result.version, ' · ', E('code', {}, result.service),
+                        result.category === 'proxy' ? ' · ' + _('Прокси') : '']),
                     E('p', {}, result.description || ''),
                     attach
                 );
@@ -307,8 +316,9 @@ function adapterCatalog(onChange) {
 
 return view.extend({
     load: function() {
+        var localTemplates = templates.load();
         var services = session.getLocalData('menu')?.children?.admin?.children?.services?.children;
-        if (!services?.zapret2?.satisfied) return;
+        if (!services?.zapret2?.satisfied) return localTemplates;
 
         return request.get(L.url('admin', 'menu'), { cache: false, timeout: 3000 }).then(function(response) {
             if (!response.ok) return;
@@ -319,17 +329,21 @@ return view.extend({
             }
         }).catch(function() {
             // The menu refresh must not prevent the OWS panel from opening.
+        }).then(function() {
+            return localTemplates;
         });
     },
 
-    render: function() {
+    render: function(templateWarning) {
         var phase = E('p', { class: 'ows-phase', 'aria-live': 'polite' }, _('Загрузка статуса'));
         var job = E('code');
         var outputJob = '';
         var outputText = E('pre', { class: 'ows-job-output' });
         var details = E('details', { hidden: '' }, [E('summary', {}, _('Журнал задания')), outputText]);
         var selectedJob = '';
+        var nextRefresh = 0;
         var jobObservers = Object.create(null);
+        var moduleTemplates = Object.create(null);
         var editor = E('div');
         var resources = E('div');
         var catalogLoaded = false;
@@ -349,20 +363,28 @@ return view.extend({
         }
         details.addEventListener('toggle', loadOutput);
 
-        function refresh() {
+        function activePhase(phase) {
+            return ['queued', 'validating', 'applying', 'rolling_back'].includes(phase);
+        }
+
+        function refresh(force) {
+            var now = Date.now();
+            if (!force && now < nextRefresh) return;
             var id = selectedJob;
             var request = id ? jobStatus(id) : status();
             function notify(result) {
                 var observer = jobObservers[result.job];
-                if (!observer || ['queued', 'applying'].indexOf(result.phase) >= 0) return;
+                if (!observer || activePhase(result.phase)) return;
                 delete jobObservers[result.job];
                 observer(result);
             }
             var other = Object.keys(jobObservers).filter(function(key) { return key !== id; });
+            nextRefresh = now + (other.length || jobObservers[id] ? 3000 : 15000);
             var primary = request.then(function(result) {
                 notify(result);
                 if (id !== selectedJob) return;
-                phase.textContent = statusLabel(result);
+                if (activePhase(result.phase)) nextRefresh = Date.now() + 3000;
+                phase.textContent = statusLabel(result, moduleTemplates[result.kind]);
                 job.textContent = result.job || '';
                 var nextOutput = result.has_output && result.phase !== 'applying' ? result.job : '';
                 if (nextOutput !== outputJob) {
@@ -386,7 +408,7 @@ return view.extend({
         function followJob(id, observer) {
             selectedJob = id;
             if (observer) jobObservers[id] = observer;
-            refresh();
+            refresh(true);
         }
 
         function option(value, title) {
@@ -557,18 +579,22 @@ return view.extend({
             } },
             zapret2Module.native,
             { id: 'zapret2-constructor', label: _('Конструктор Zapret2'), content: zapret2Module.constructor,
-                activate: zapret2Module.loadConstructor }
+                activate: zapret2Module.loadConstructor },
+            templates.panel(zapretTools.presets(followJob)),
+            templates.panel(zapretTools.comparison(followJob))
         ], openNative ? zapret2Module.native.id : null, function(id) {
             if (modules && modules.selectedId() === 'zapret2') rememberNativeTab(id === zapret2Module.native.id);
         });
         var workspace = E('div');
         var registry = adapterCatalog(renderModules);
+        var selectedProxy;
         var zapret2Panel = E('div', {}, [
             E('div', { class: 'ows-module-heading' }, [E('h3', {}, _('Zapret2')), refreshButton]),
             notice, zapret2.content, zapret2Module.feedback
         ]);
 
         function renderModules(entries, vpnDrivers) {
+            moduleTemplates = Object.create(null);
             var tabs = [
                 { id: 'overview', label: _('Обзор'), content: registry.content },
                 { id: 'zapret2', label: _('Zapret2'), activate: zapret2Module.refresh, content: zapret2Panel },
@@ -579,26 +605,55 @@ return view.extend({
                 {name:'Zapret2',description:_('Движок nfqws2, редактор тактик и конструктор'),tab:1},
                 {name:'Zapret',description:_('Первая версия, движок nfqws'),tab:2}
             ];
+            var proxyTabs = [];
+            var proxyContent = E('div');
+            var proxyTabIndex = tabs.length;
+            var proxyModules;
+            var proxyGroup = templates.proxyGroup();
+            var context = { createTabs: createTabs, followJob: followJob };
+
+            function openProxies(index) {
+                if (proxyModules) {
+                    if (index != null) proxyModules.select(index);
+                    return;
+                }
+                if (!proxyTabs.length) {
+                    proxyContent.replaceChildren(E('p', {}, proxyGroup.empty));
+                    return;
+                }
+                proxyModules = createTabs(proxyGroup.sectionsLabel, proxyTabs, index == null ? selectedProxy : index,
+                    function(id) { selectedProxy = id; });
+                proxyContent.replaceChildren(proxyModules.content);
+            }
+
+            tabs.push({ id: 'proxies', label: proxyGroup.label, content: proxyContent, activate: openProxies });
+            tabs.push(templates.panel(dns.tab(followJob)));
             entries.forEach(function(entry) {
                 if (entry.id === 'zapret' || entry.id === 'zapret2') return;
-                if (entry.kind === 'adapter') {
-                    rows.push(Object.assign({ tab: tabs.length }, entry));
-                    if (entry.id === 'stgws' && entry.service === 'tgws') {
-                        tabs.push(stgws.tab(entry, createTabs, followJob));
-                    } else if (vpn.supports(entry, vpnDrivers)) {
-                        tabs.push(vpn.tab(entry, createTabs, followJob));
-                    } else {
-                        tabs.push(adapterTab(entry));
-                    }
-                } else {
+                if (entry.kind !== 'adapter') {
                     rows.push(entry);
+                    return;
+                }
+                var template = templates.resolve(entry, vpnDrivers);
+                moduleTemplates[entry.id] = template;
+                if (template.label) entry = Object.assign({}, entry, { name: template.label });
+                var tab = (template.tab && template.tab(entry, context, template)) || adapterTab(entry);
+                if (template.proxy) {
+                    rows.push(Object.assign({ tab: proxyTabIndex, proxy: proxyTabs.length }, entry));
+                    proxyTabs.push(tab);
+                } else {
+                    rows.push(Object.assign({ tab: tabs.length }, entry));
+                    tabs.push(tab);
                 }
             });
             registry.list.replaceChildren.apply(registry.list, rows.map(function(entry) {
                 var actions = [];
                 if (entry.tab != null) {
                     var open = E('button', { class: 'cbi-button', type: 'button' }, _('Открыть'));
-                    open.addEventListener('click', function() { modules.select(entry.tab); });
+                    open.addEventListener('click', function() {
+                        if (entry.proxy != null) openProxies(entry.proxy);
+                        modules.select(entry.tab);
+                    });
                     actions.push(open);
                 }
                 var link = entrySource(entry);
@@ -622,10 +677,11 @@ return view.extend({
         renderModules([], {});
         registry.load();
         refresh();
-        poll.add(refresh, 3);
+        poll.add(function() { return refresh(false); }, 3);
         return E('div', { class: 'ows' }, [
             E('link', { rel: 'stylesheet', href: L.resource('view/ows-services.css') }),
             E('h2', {}, _('OWS')),
+            templateWarning ? E('p', { role: 'status' }, templateWarning) : '',
             E('section', { class: 'ows-status', 'aria-label': _('Очередь OWS') }, [
                 E('strong', {}, _('Последняя операция')),
                 phase,

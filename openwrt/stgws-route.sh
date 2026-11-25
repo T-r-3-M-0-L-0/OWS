@@ -13,6 +13,11 @@ error() {
     exit "${2:-1}"
 }
 
+for tool in flock timeout awk sort; do
+    command -v "$tool" >/dev/null || error "Для проверки sTGWS нужна утилита $tool"
+done
+[ -x /usr/sbin/stgws ] || error 'Движок sTGWS не установлен'
+
 exec 9>/var/lock/tgws-route-smart.lock
 flock -n 9 || error 'Проверка карты sTGWS уже выполняется'
 WORK=$(mktemp -d "$DIR/.route-smart.XXXXXX") || exit 1
@@ -70,9 +75,12 @@ choose_route() {
     return 1
 }
 
-# Independent DCs can run concurrently. Attempts for a DC are sequential.
+# Limit concurrent probes on routers with little free memory.
+batch=0
 while read -r key kind domain; do
     choose_route "$key" "$kind" "$domain" > "$WORK/$key.route" 9>&- &
+    batch=$((batch + 1))
+    if [ "$batch" -eq 2 ]; then wait; batch=0; fi
 done < "$WORK/routes"
 wait
 
@@ -105,10 +113,11 @@ case "$MODE" in
             exit 0
         fi
         # Rewrite only WS routes that changed, keeping comments and other entries.
+        cp -p "$WORK/active" "$WORK/next" || error 'Не удалось подготовить файл карты'
         awk 'NR==FNR { if ($2=="ws") domain[$1]=$3; next }
              $2=="ws" && ($1 in domain) && $3 != domain[$1] { $3=domain[$1] }
-             { print }' "$WORK/validated" "$INPUT" > "$WORK/next"
-        chmod "$(stat -c %a "$ROUTE")" "$WORK/next"
+             { print }' "$WORK/validated" "$INPUT" > "$WORK/next" ||
+            error 'Не удалось собрать карту sTGWS'
         ;;
 esac
 
@@ -116,7 +125,7 @@ bridge_ready() {
     local i
     for i in 1 2 3 4 5 6 7 8; do
         if pidof stgws >/dev/null &&
-            stgws tgws-instances --spec "$DIR/spec.json" --state-dir /var/lib/stgws 2>/dev/null | grep -q .; then
+            timeout 4 /usr/sbin/stgws tgws-instances --spec "$DIR/spec.json" --state-dir /var/lib/stgws 2>/dev/null | grep -q .; then
             return 0
         fi
         sleep 1

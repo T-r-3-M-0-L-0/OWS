@@ -4,5 +4,6 @@
   "name": "sTGWS",
   "version": "0.1.0",
   "service": "tgws",
+  "category": "proxy",
   "description": "Состояние установленной службы sTGWS."
 }

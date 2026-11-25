@@ -1,0 +1,9 @@
+{
+  "schema": 1,
+  "id": "tg-ws-proxy",
+  "name": "Telegram-прокси",
+  "version": "0.1.0",
+  "service": "tg-ws-proxy",
+  "category": "proxy",
+  "description": "Состояние и управление установленной службой tg-ws-proxy."
+}
