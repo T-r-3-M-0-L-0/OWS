@@ -12,6 +12,7 @@
 'require view.ows-dns as dns';
 'require view.ows-doh as doh';
 'require view.ows-domain-search as domainSearch';
+'require view.ows-legacy-cleanup as legacyCleanup';
 'require view.ows-instructions as instructions';
 
 var status = rpc.declare({ object: 'ows', method: 'status' });
@@ -71,6 +72,7 @@ function statusLabel(result, template) {
         return (parts[0] === 'zapret2' ? 'Zapret2' : 'Zapret') + ' · ' + operation + ' · ' + label;
     }
     if (result.kind === 'dns') return _('Проверка DNS') + ' · ' + label;
+    if (result.kind === 'cleanup') return _('Очистка остатков Zapret-Manager') + ' · ' + label;
     if (result.kind === 'doh') return 'DoH · ' + (result.action === 'install' ? _('Установка пакетов') + ' · ' : '') + label;
     if (result.kind === 'system') {
         var systemNames = {quic:_('Блокировка QUIC'),ipv6:_('IPv6 в Zapret'),zram:'ZRAM',
@@ -462,6 +464,7 @@ return view.extend({
         var workspace = E('div');
         var instructionsTab = templates.panel(instructions.tab());
         var registry = adapterCatalog(renderModules);
+        var cleanupPanel = templates.panel({id:'legacy-cleanup', content:legacyCleanup.panel(followJob)});
         var systemTabs = createTabs(_('Системные модули'), templates.system(followJob));
         var systemPanel = templates.panel({id:'overview-system',content:E('section', {class:'ows-service-preview'}, [
             E('h4', {}, _('Системные модули')), systemTabs.content
@@ -486,7 +489,7 @@ return view.extend({
             };
             var tabs = [
                 { id: 'overview', label: _('Обзор'), activate:systemPanel.activate,
-                    content: [templates.panel({id:'domain-search', content:domainPanel}).content, registry.content] },
+                    content: [templates.panel({id:'domain-search', content:domainPanel}).content, registry.content, cleanupPanel.content] },
                 { id: 'zapret2', label: _('Zapret2'), content: zapret2Panel, activate: function() {
                     zapret2Module.refresh();
                     zapret2.activate();

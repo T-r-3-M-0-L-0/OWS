@@ -82,6 +82,10 @@ enqueue() (
             . "$LIB/system.sh"
             [ "$#" = 1 ] && system_action_valid "$1" || fail 'Unknown system action'
             ;;
+        cleanup)
+            . "$LIB/legacy-cleanup.sh"
+            [ "$#" = 1 ] && legacy_cleanup_action_valid "$1" || fail 'Invalid cleanup revision'
+            ;;
         zapret-module)
             . "$LIB/zapret-module.sh"
             . "$LIB/zapret-constructor.sh"
@@ -215,6 +219,10 @@ process_module() {
             export OWS_JOB_RESULT="$JOBS/$id/result.json"
             case "$kind" in
                 stgws) stgws_execute "$action" ;;
+                cleanup)
+                    . "$LIB/legacy-cleanup.sh"
+                    legacy_cleanup_apply "$action"
+                    ;;
                 tg-ws-proxy)
                     . "$LIB/tg-ws-proxy.sh"
                     tgws_proxy_execute "$action"
@@ -427,6 +435,13 @@ case "${1:-}" in
     tg-ws-proxy) shift; enqueue tg-ws-proxy "$@" ;;
     adblock) shift; enqueue adblock "$@" ;;
     doh) shift; enqueue doh "$@" ;;
+    cleanup)
+        case "$#:${2:-}" in
+            2:preview) . "$LIB/legacy-cleanup.sh"; legacy_cleanup_preview ;;
+            3:apply) enqueue cleanup "apply:$3" ;;
+            *) fail 'Usage: ows cleanup preview | ows cleanup apply REVISION' ;;
+        esac
+        ;;
     system)
         shift
         . "$LIB/system.sh"

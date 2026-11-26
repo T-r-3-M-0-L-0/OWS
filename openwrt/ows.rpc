@@ -110,7 +110,7 @@ ows_guides() (
 )
 
 case "$1:$2" in
-    list:) echo '{"instructions_list":{},"instructions_read":{"id":""},"instructions_write":{"operation":"","id":"","expected":"","content":""},"status":{},"job_status":{"job":""},"job_output":{"job":""},"catalog":{},"preview":{"profile":"","line":"","action":"","blob":"","expected":""},"apply_action":{"profile":"","line":"","action":"","blob":"","expected":""},"module_list":{},"module_status":{"id":""},"module_preview":{"manifest":""},"module_attach":{"manifest":""},"module_link":{"name":"","source":""},"stgws_info":{},"stgws_action":{"action":""},"tg_proxy_info":{},"tg_proxy_action":{"action":""},"steer_info":{},"steer_action":{"action":""},"vpn_state":{"id":""},"vpn_action":{"id":"","action":"","target":""},"vpn_editor":{"id":""},"vpn_nodes":{"id":"","target":""},"vpn_edit":{"id":"","change":""},"vpn_subscription_url":{"id":""},"vpn_list_page":{"job":"","kind":"","page":0,"search":""},"zapret_module_info":{"id":""},"zapret_module_action":{"id":"","action":""},"system_info":{},"system_action":{"action":""},"adblock_draft":{},"adblock_action":{"action":"","change":""},"domain_search":{"domain":""},"doh_info":{},"doh_action":{"action":""},"dns_info":{},"dns_check":{"domain":""},"zapret_presets":{},"zapret_preset_preview":{"name":""},"zapret_preset_write":{"operation":"","name":"","expected":"","selection":""},"zapret_constructor":{"topic":"","profile":"","list":"","page":0,"run":""}}' ;;
+    list:) echo '{"instructions_list":{},"instructions_read":{"id":""},"instructions_write":{"operation":"","id":"","expected":"","content":""},"status":{},"job_status":{"job":""},"job_output":{"job":""},"catalog":{},"preview":{"profile":"","line":"","action":"","blob":"","expected":""},"apply_action":{"profile":"","line":"","action":"","blob":"","expected":""},"module_list":{},"module_status":{"id":""},"module_preview":{"manifest":""},"module_attach":{"manifest":""},"module_link":{"name":"","source":""},"stgws_info":{},"stgws_action":{"action":""},"tg_proxy_info":{},"tg_proxy_action":{"action":""},"steer_info":{},"steer_action":{"action":""},"vpn_state":{"id":""},"vpn_action":{"id":"","action":"","target":""},"vpn_editor":{"id":""},"vpn_nodes":{"id":"","target":""},"vpn_edit":{"id":"","change":""},"vpn_subscription_url":{"id":""},"vpn_list_page":{"job":"","kind":"","page":0,"search":""},"zapret_module_info":{"id":""},"zapret_module_action":{"id":"","action":""},"system_info":{},"system_action":{"action":""},"cleanup_preview":{},"cleanup_apply":{"revision":""},"adblock_draft":{},"adblock_action":{"action":"","change":""},"domain_search":{"domain":""},"doh_info":{},"doh_action":{"action":""},"dns_info":{},"dns_check":{"domain":""},"zapret_presets":{},"zapret_preset_preview":{"name":""},"zapret_preset_write":{"operation":"","name":"","expected":"","selection":""},"zapret_constructor":{"topic":"","profile":"","list":"","page":0,"run":""}}' ;;
     call:instructions_list|call:instructions_read|call:instructions_write) ows_guides "$2" ;;
     call:vpn_state|call:vpn_action|call:vpn_editor|call:vpn_nodes|call:vpn_edit|call:vpn_subscription_url) ows_vpn "$2" ;;
     call:tg_proxy_info|call:tg_proxy_action)
@@ -189,6 +189,16 @@ case "$1:$2" in
         . /usr/lib/ows/system-handover.sh
         . /usr/lib/ows/network-compat.sh
         system_info
+        ;;
+    call:cleanup_preview)
+        /usr/sbin/ows cleanup preview
+        ;;
+    call:cleanup_apply)
+        . /usr/share/libubox/jshn.sh
+        . /usr/lib/ows/rpc-response.sh
+        json_load "$(cat)" || exit 1
+        json_get_var revision revision
+        ows_rpc_enqueue 'Не удалось поставить очистку в очередь. Повторите проверку.' cleanup apply "$revision"
         ;;
     call:adblock_action|call:doh_action|call:system_action)
         . /usr/share/libubox/jshn.sh

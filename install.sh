@@ -35,6 +35,7 @@ adapters/system.sh /usr/lib/ows/system.sh 644
 adapters/system-handover.sh /usr/lib/ows/system-handover.sh 644
 adapters/network-compat.sh /usr/lib/ows/network-compat.sh 644
 adapters/network-handover.sh /usr/lib/ows/network-handover.sh 644
+adapters/legacy-cleanup.sh /usr/lib/ows/legacy-cleanup.sh 644
 adapters/zapret-module.sh /usr/lib/ows/zapret-module.sh 644
 adapters/packages.sh /usr/lib/ows/packages.sh 644
 adapters/zapret-constructor.sh /usr/lib/ows/zapret-constructor.sh 644
@@ -106,6 +107,7 @@ Docs/instructions/openwrt.md /usr/lib/ows/instructions-openwrt.md 644
 Docs/instructions/tspu-classification.md /usr/lib/ows/instructions-tspu-classification.md 644
 luci/ows-doh.js /www/luci-static/resources/view/ows-doh.js 644
 luci/ows-domain-search.js /www/luci-static/resources/view/ows-domain-search.js 644
+luci/ows-legacy-cleanup.js /www/luci-static/resources/view/ows-legacy-cleanup.js 644
 luci/ows-native.js /www/luci-static/resources/view/ows-native.js 644
 luci/ows-native-zapret2.js /www/luci-static/resources/view/ows-native-zapret2.js 644
 luci/ows.css /www/luci-static/resources/view/ows-services.css 644
