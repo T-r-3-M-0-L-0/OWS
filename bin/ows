@@ -13,9 +13,15 @@ fail() { printf '%s\n' "$*" >&2; exit 1; }
 prepare() { mkdir -p "$QUEUE" "$JOBS" "$STATE"; }
 
 publish() {
-    printf '{"job":"%s","phase":"%s","updated":%s}\n' "$1" "$2" "$(date +%s)" > "$JOBS/$1/status.new" &&
-        mv "$JOBS/$1/status.new" "$JOBS/$1/status.json" &&
-        printf '%s %s\n' "$(date +%s)" "$2" >> "$JOBS/$1/events" &&
+    local now
+    now=$(date +%s) || return 1
+    if [ "$2" = waiting ]; then
+        printf '{"job":"%s","phase":"waiting","wait_reason":"%s","updated":%s}\n' "$1" "$3" "$now" > "$JOBS/$1/status.new" || return 1
+    else
+        printf '{"job":"%s","phase":"%s","updated":%s}\n' "$1" "$2" "$now" > "$JOBS/$1/status.new" || return 1
+    fi
+    mv "$JOBS/$1/status.new" "$JOBS/$1/status.json" &&
+        printf '%s %s%s\n' "$now" "$2" "${3:+ $3}" >> "$JOBS/$1/events" &&
         cp "$JOBS/$1/status.json" "$RUN/latest.$1.new" &&
         mv "$RUN/latest.$1.new" "$RUN/latest.json"
 }
@@ -287,7 +293,7 @@ process_module() {
                     "${kind}_execute" "$action" "$JOBS/$id/payload"
                     ;;
             esac
-        ) 6>&- || outcome=$?
+        ) 3>&- 6>&- 7>&- 8>&- || outcome=$?
         printf '%s\n' "$outcome" > "$JOBS/$id/exit"
     ) 2>&1 9>&- | tail -c 8192 > "$JOBS/$id/output" || return 1
     outcome=$(cat "$JOBS/$id/exit") || return 1
@@ -309,13 +315,22 @@ diagnostic_job() {
 }
 
 process_diagnostic() (
-    local id=$1 kind=$2 phase
+    local id=$1 kind=$2 status action result
     exec 6>"$RUN/diagnostic.lock"
     flock -n 6 || exit 0
     [ -f "$QUEUE/$id" ] || exit 0
-    phase=$(cat "$JOBS/$id/status.json" 2>/dev/null || :)
-    case "$phase" in
-        *'"phase":"queued"'*) process_module "$id" "$kind" || exit 1 ;;
+    status=$(cat "$JOBS/$id/status.json" 2>/dev/null || :)
+    case "$status" in
+        *'"phase":"queued"'*|*'"phase":"waiting"'*)
+            action=$(cat "$JOBS/$id/action") || exit 1
+            if guard_queued_job "$id" "$status" "$kind" "$action"; then
+                process_module "$id" "$kind" || exit 1
+            else
+                result=$?
+                [ "$result" = 75 ] && exit 0
+                exit "$result"
+            fi
+            ;;
         *'"phase":"done"'*|*'"phase":"operation_failed"'*|*'"phase":"interrupted"'*) ;;
         *) publish "$id" interrupted || exit 1 ;;
     esac
@@ -325,6 +340,7 @@ process_diagnostic() (
 diagnostic_worker() {
     local ticket id kind
     prepare
+    . "$LIB/queue-locks.sh"
     exec 9>"$RUN/diagnostic-worker.lock"
     flock -n 9 || fail 'Diagnostic worker already running'
     while :; do
@@ -340,14 +356,55 @@ diagnostic_worker() {
     done
 }
 
-worker() {
-    prepare
-    exec 9>"$RUN/worker.lock"
-    flock -n 9 || fail 'Worker already running'
-    # shellcheck source=../adapters/zapret2.sh
-    . "$LIB/zapret2.sh"
-    if [ -r "$LIB/stgws.sh" ]; then . "$LIB/stgws.sh"; fi
-    for dep in uci cmp pgrep; do command -v "$dep" >/dev/null || fail "Missing dependency: $dep"; done
+process_writer() (
+    local id=$1 kind=$2 action=$3 status
+    status=$(cat "$JOBS/$id/status.json" 2>/dev/null || :)
+    case "$status" in
+        *'"phase":"queued"'*|*'"phase":"waiting"'*)
+            guard_queued_job "$id" "$status" "$kind" "$action" || exit $?
+            case "$kind" in
+                zapret2|'') process "$id" 3>&- 7>&- 8>&- || exit 1 ;;
+                *) process_module "$id" "$kind" || exit 1 ;;
+            esac
+            ;;
+        *'"phase":"applied"'*|*'"phase":"rolled_back"'*|*'"phase":"invalid_config"'*|*'"phase":"snapshot_failed"'*|*'"phase":"config_changed"'*|*'"phase":"config_busy"'*|*'"phase":"done"'*|*'"phase":"operation_failed"'*|*'"phase":"rollback_failed"'*|*'"phase":"interrupted"'*) ;;
+        *) publish "$id" interrupted || exit 1 ;;
+    esac
+    rm -f "$QUEUE/$id" "$JOBS/$id/candidate" "$JOBS/$id/payload"
+)
+
+writer_pass() {
+    local pass=$1 ticket id kind action result
+    for ticket in "$QUEUE"/*; do
+        [ -f "$ticket" ] || continue
+        id=${ticket##*/}
+        kind=$(cat "$JOBS/$id/kind" 2>/dev/null || :)
+        if diagnostic_job "$kind" "$id"; then
+            if [ "$pass" = once ]; then process_diagnostic "$id" "$kind" 9>&- || return 1; fi
+            continue
+        fi
+        action=$(cat "$JOBS/$id/action" 2>/dev/null || :)
+        if priority_job "$kind" "$action"; then
+            [ "$pass" = priority ] || continue
+        elif [ "$pass" = priority ]; then
+            continue
+        fi
+        if process_writer "$id" "$kind" "$action"; then
+            if [ "$pass" != priority ]; then writer_pass priority || return 1; fi
+            continue
+        else
+            result=$?
+        fi
+        if [ "$result" = 75 ]; then
+            [ "$pass" = priority ] && continue
+            break
+        fi
+        return 1
+    done
+    return 0
+}
+
+recover_worker() {
     if [ -d "$PENDING" ]; then (lock_zapret2 && recover) || return 1; fi
     if [ -r "$LIB/system.sh" ]; then
         . "$LIB/zapret-module.sh"
@@ -373,42 +430,45 @@ worker() {
     if [ -r "$LIB/vpn.sh" ]; then
         ( . "$LIB/vpn.sh"; ows_vpn_recover "$LIB" ) || fail 'Pending VPN transaction needs recovery'
     fi
-    local cutoff remaining
+}
+
+worker() {
+    prepare
+    exec 9>"$RUN/worker.lock"
+    flock -n 9 || fail 'Worker already running'
+    . "$LIB/queue-locks.sh"
+    . "$LIB/zapret2.sh"
+    if [ -r "$LIB/stgws.sh" ]; then . "$LIB/stgws.sh"; fi
+    for dep in uci cmp pgrep; do command -v "$dep" >/dev/null || fail "Missing dependency: $dep"; done
+    (
+        lock_job_resources -x dns firewall telegram || exit 1
+        recover_worker 3>&- 7>&- 8>&-
+    ) || return 1
+    # Keep the background maintenance functions loaded in the worker.
+    if [ -r "$LIB/adblock-live.sh" ]; then
+        . "$LIB/adblock-migration.sh"
+        . "$LIB/adblock-policy.sh"
+        . "$LIB/adblock-live.sh"
+    fi
+    if [ -r "$LIB/network-compat.sh" ]; then
+        . "$LIB/system.sh"
+        . "$LIB/network-compat.sh"
+    fi
+    local cutoff remaining pass=normal
+    if [ "${1:-}" = --once ]; then pass=once; fi
     while :; do
-        for ticket in "$QUEUE"/*; do
-            [ -f "$ticket" ] || break
-            id=${ticket##*/}
-            kind=$(cat "$JOBS/$id/kind" 2>/dev/null || :)
-            if diagnostic_job "$kind" "$id"; then
-                if [ "${1:-}" = --once ]; then
-                    process_diagnostic "$id" "$kind" 9>&-
-                fi
-                continue
-            fi
-            phase=$(cat "$JOBS/$id/status.json" 2>/dev/null || :)
-            case "$phase" in
-                *'"phase":"queued"'*)
-                    case "$kind" in
-                        zapret2|'') process "$id" || return 1 ;;
-                        *) process_module "$id" "$kind" || return 1 ;;
-                    esac
-                    ;;
-                *'"phase":"applied"'*|*'"phase":"rolled_back"'*|*'"phase":"invalid_config"'*|*'"phase":"snapshot_failed"'*|*'"phase":"config_changed"'*|*'"phase":"config_busy"'*|*'"phase":"done"'*|*'"phase":"operation_failed"'*|*'"phase":"rollback_failed"'*) ;;
-                *) publish "$id" interrupted ;;
-            esac
-            rm -f "$ticket" "$JOBS/$id/candidate" "$JOBS/$id/payload"
-        done
+        writer_pass priority && writer_pass "$pass" || return 1
         [ "${1:-}" != --once ] || return 0
         if [ -r "$LIB/stgws.sh" ] && [ "$(date +%s)" -ge "${next_stgws_tick:-0}" ]; then
             stgws_tick || :
             next_stgws_tick=$(($(date +%s) + 60))
         fi
-        if command -v adblock_live_ensure >/dev/null && [ "$(date +%s)" -ge "${next_adblock_tick:-0}" ]; then
-            adblock_live_ensure || :
+        if command -v adblock_live_ensure >/dev/null && [ "$(date +%s)" -ge "${next_adblock_tick:-0}" ] &&
+            run_maintenance adblock_live_ensure; then
             next_adblock_tick=$(($(date +%s) + 60))
         fi
-        if command -v network_tick >/dev/null && [ "$(date +%s)" -ge "${next_network_tick:-0}" ]; then
-            network_tick 9>&- >/dev/null 2>&1 || :
+        if command -v network_tick >/dev/null && [ "$(date +%s)" -ge "${next_network_tick:-0}" ] &&
+            run_maintenance network_tick >/dev/null 2>&1; then
             next_network_tick=$(($(date +%s) + 60))
         fi
         if [ "$(date +%s)" -ge "${next_cleanup:-0}" ]; then

@@ -28,6 +28,7 @@ var moduleLink = rpc.declare({ object: 'ows', method: 'module_link', params: ['n
 var labels = {
     idle: _('Нет операций'),
     queued: _('В очереди'),
+    waiting: _('Ожидает освобождения ресурсов'),
     validating: _('Проверка конфигурации'),
     applying: _('Применение'),
     applied: _('Применено'),
@@ -58,6 +59,15 @@ var stgwsActions = {
 
 function statusLabel(result, template) {
     var label = labels[result.phase] || _('Статус неизвестен');
+    if (result.phase === 'waiting') {
+        var waits = {
+            dns: _('Ожидает завершения операции с DNS'),
+            firewall: _('Ожидает освобождения файрвола и маршрутов'),
+            telegram: _('Ожидает завершения операции с ТГ-прокси'),
+            strategy: _('Ожидает завершения проверки Zapret2')
+        };
+        label = waits[result.wait_reason] || label;
+    }
     if (template && template.jobActions && Object.prototype.hasOwnProperty.call(template.jobActions, result.action)) {
         return (template.jobName || result.kind) + ' · ' + template.jobActions[result.action] + ' · ' + label;
     }
@@ -346,7 +356,7 @@ return view.extend({
         details.addEventListener('toggle', loadOutput);
 
         function activePhase(phase) {
-            return ['queued', 'validating', 'applying', 'rolling_back'].includes(phase);
+            return ['queued', 'waiting', 'validating', 'applying', 'rolling_back'].includes(phase);
         }
 
         function refresh(force) {
@@ -400,7 +410,12 @@ return view.extend({
             onNativeLoad: function() { refreshZapret2Tab('zapret2-presets'); },
             onApplied: onZapretConfigApplied
         });
+        var classicHashes = {
+            'zapret-service': '#ows-tab-zapret-service-panel',
+            'zapret-native': '#ows-tab-zapret-native-panel'
+        };
         var zapret2Hashes = {
+            'zapret2-service': '#ows-tab-zapret2-service-panel',
             'zapret2-native': '#ows-tab-zapret2-native-panel',
             'zapret2-presets': '#ows-tab-zapret2-presets-panel'
         };
@@ -418,34 +433,52 @@ return view.extend({
         });
         var presetAliases = ['#ows-tab-zapret2-constructor-panel', resourceAlias].concat(Object.values(presetSectionHashes));
         var instructionsHash = '#ows-tab-instructions-panel';
+        var classicStart = Object.keys(classicHashes).find(function(id) { return classicHashes[id] === window.location.hash; });
         var zapret2Start = presetAliases.includes(window.location.hash) ? 'zapret2-presets' :
             Object.keys(zapret2Hashes).find(function(id) { return zapret2Hashes[id] === window.location.hash; });
+        var versionStart = zapret2Start || window.location.hash === '#ows-tab-zapret2-panel' ? 'zapret2' : 'zapret';
+        var moduleHashes = Object.values(classicHashes).concat(Object.values(zapret2Hashes), presetAliases,
+            ['#ows-tab-zapret-group-panel', '#ows-tab-zapret-panel', '#ows-tab-zapret2-panel']);
         var modules;
 
+        function isZapretVersion(id) {
+            return modules && modules.selectedId() === 'zapret-group' && zapretVersions.selectedId() === id;
+        }
+
         function refreshZapret2Tab(id) {
-            if (modules && modules.selectedId() === 'zapret2' && zapret2.selectedId() === id) zapret2.activate();
+            if (isZapretVersion('zapret2') && zapret2.selectedId() === id) zapret2.activate();
         }
 
         function onZapretConfigApplied() {
             refreshZapret2Tab('zapret2-native');
-            if (modules && modules.selectedId() === 'zapret2' && zapret2.selectedId() === 'zapret2-presets' &&
+            if (isZapretVersion('zapret2') && zapret2.selectedId() === 'zapret2-presets' &&
                 presetTab.selectedSection() === 'zapret2-tactics') tacticsTab.activate();
         }
 
-        function rememberZapret2Tab(id, section) {
-            var hash = (id === 'zapret2-presets' && presetSectionHashes[section || presetTab.selectedSection()]) || zapret2Hashes[id];
+        function rememberModuleTab(id, section) {
+            var hash;
+            if (id === 'instructions') hash = instructionsHash;
+            if (id === 'zapret-group') {
+                if (zapretVersions.selectedId() === 'zapret2') {
+                    var tab = zapret2.selectedId();
+                    hash = (tab === 'zapret2-presets' && presetSectionHashes[section || presetTab.selectedSection()]) || zapret2Hashes[tab];
+                } else {
+                    hash = classicHashes[classicTabs.selectedId()];
+                }
+            }
             if (hash === presetSectionHashes['zapret2-tactics'] && window.location.hash === resourceAlias) return;
             if (hash && window.location.hash !== hash)
                 window.history.replaceState(window.history.state, '', hash);
-            else if (!hash && (Object.values(zapret2Hashes).includes(window.location.hash) ||
-                presetAliases.includes(window.location.hash) || window.location.hash === instructionsHash))
+            else if (!hash && (moduleHashes.includes(window.location.hash) || window.location.hash === instructionsHash))
                 window.history.replaceState(window.history.state, '', window.location.pathname + window.location.search);
         }
 
         var classicTabs = createTabs(_('Разделы Zapret'), [
             {id:'zapret-service',label:_('Служба и пакеты'),content:classicModule.status},
             classicModule.native
-        ].map(function(tab) { return templates.panel(tab); }));
+        ].map(function(tab) { return templates.panel(tab); }), classicStart, function() {
+            if (isZapretVersion('zapret')) rememberModuleTab('zapret-group');
+        });
         var tacticsTab = templates.panel(zapretTactics.tab(followJob, {
             showResources:showResources,
             panel:function(tab) { return templates.panel(tab); },
@@ -456,16 +489,37 @@ return view.extend({
             onZapretConfigApplied, {
                 panel:function(tab) { return templates.panel(tab); }, createTabs:createTabs, section:presetSection,tactics:tacticsTab,
                 onSectionChange:function(id) {
-                    if (modules && modules.selectedId() === 'zapret2' && zapret2.selectedId() === 'zapret2-presets')
-                        rememberZapret2Tab('zapret2-presets', id);
+                    if (isZapretVersion('zapret2') && zapret2.selectedId() === 'zapret2-presets')
+                        rememberModuleTab('zapret-group', id);
                 }
             }));
         var zapret2 = createTabs(_('Разделы Zapret2'), [
             { id: 'zapret2-service', label: _('Служба и пакеты'), content: zapret2Module.status },
             zapret2Module.native
-        ].map(function(tab) { return templates.panel(tab); }).concat(presetTab), zapret2Start, function(id) {
-            if (modules && modules.selectedId() === 'zapret2') rememberZapret2Tab(id);
+        ].map(function(tab) { return templates.panel(tab); }).concat(presetTab), zapret2Start, function() {
+            if (isZapretVersion('zapret2')) rememberModuleTab('zapret-group');
         });
+        var zapretVersions = createTabs(_('Версии Zapret'), [
+            { id:'zapret', label:_('Версия 1'), content:[classicTabs.content, classicModule.feedback],
+                activate:function() {
+                    if (!zapretVersions) return;
+                    classicModule.refresh();
+                    classicTabs.activate();
+                } },
+            { id:'zapret2', label:_('Версия 2'), content:[zapret2.content, zapret2Module.feedback],
+                activate:function() {
+                    if (!zapretVersions) return;
+                    zapret2Module.refresh();
+                    zapret2.activate();
+                } }
+        ].map(function(tab) { return templates.panel(tab); }), versionStart, function() {
+            if (modules && modules.selectedId() === 'zapret-group') rememberModuleTab('zapret-group');
+        });
+
+        function selectZapretVersion(id, tab) {
+            var sections = id === 'zapret2' ? zapret2 : classicTabs;
+            return sections.selectId(tab) && zapretVersions.selectId(id);
+        }
         var workspace = E('div');
         var instructionsTab = templates.panel(instructions.tab());
         var registry = adapterCatalog(renderModules);
@@ -480,34 +534,24 @@ return view.extend({
             return open ? open(match) : false;
         });
         var selectedGroup = Object.create(null);
-        var zapret2Panel = E('div', {}, [
-            E('div', { class: 'ows-module-heading' }, E('h3', {}, _('Zapret2'))),
-            zapret2.content, zapret2Module.feedback
-        ]);
 
         function renderModules(entries, vpnDrivers, installed) {
             moduleTemplates = Object.create(null);
             domainTargets = Object.create(null);
             domainTargets.zapret2 = function() {
-                if (!modules.selectId('zapret2')) return false;
-                return zapret2.selectId(zapret2Module.native.id);
+                return selectZapretVersion('zapret2', zapret2Module.native.id) && modules.selectId('zapret-group');
             };
             var tabs = [
                 { id: 'overview', label: _('Обзор'), activate:systemPanel.activate,
                     content: [templates.panel({id:'domain-search', content:domainPanel}).content, registry.content, cleanupPanel.content] },
-                { id: 'zapret2', label: _('Zapret2'), content: zapret2Panel, activate: function() {
-                    zapret2Module.refresh();
-                    zapret2.activate();
-                } },
-                { id: 'zapret', label: _('Zapret'), activate: classicModule.refresh,
-                    content: E('div', {}, [E('h3', {}, _('Zapret')), classicTabs.content, classicModule.feedback]) }
+                { id: 'zapret-group', label: _('Zapret'), content: zapretVersions.content, activate: zapretVersions.activate }
             ].map(function(tab) { return templates.panel(tab); });
             tabs.push(instructionsTab);
             var rows = [
                 {name:'Zapret2',description:_('Движок nfqws2, редактор тактик и конструктор'),tab:1,installed:installed.zapret2,
-                    open:function() { zapret2.selectId('zapret2-service'); }},
-                {name:'Zapret',description:_('Первая версия, движок nfqws'),tab:2,installed:installed.zapret,
-                    open:function() { classicTabs.selectId('zapret-service'); }},
+                    open:function() { selectZapretVersion('zapret2', 'zapret2-service'); }},
+                {name:'Zapret',description:_('Первая версия, движок nfqws'),tab:1,installed:installed.zapret,
+                    open:function() { selectZapretVersion('zapret', 'zapret-service'); }},
                 {content:systemPanel.content}
             ];
             var groups = Object.create(null);
@@ -602,15 +646,10 @@ return view.extend({
                     E('div', { class: 'ows-actions ows-entry-actions' }, actions)
                 ]);
             }));
-            var initial = window.location.hash === instructionsHash ? 'instructions' : zapret2Start ? 'zapret2' : 'overview';
+            var initial = window.location.hash === instructionsHash ? 'instructions' :
+                moduleHashes.includes(window.location.hash) ? 'zapret-group' : 'overview';
             var active = modules ? modules.selectedId() : initial;
-            modules = createTabs(_('Модули OWS'), tabs, active, function(id) {
-                if (id === 'instructions') {
-                    if (window.location.hash !== instructionsHash) window.history.replaceState(window.history.state, '', instructionsHash);
-                    return;
-                }
-                rememberZapret2Tab(id === 'zapret2' ? zapret2.selectedId() : null);
-            });
+            modules = createTabs(_('Модули OWS'), tabs, active, rememberModuleTab);
             workspace.replaceChildren(modules.content);
         }
 

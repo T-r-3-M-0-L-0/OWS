@@ -36,6 +36,7 @@ adapters/system-handover.sh /usr/lib/ows/system-handover.sh 644
 adapters/network-compat.sh /usr/lib/ows/network-compat.sh 644
 adapters/network-handover.sh /usr/lib/ows/network-handover.sh 644
 adapters/legacy-cleanup.sh /usr/lib/ows/legacy-cleanup.sh 644
+adapters/queue-locks.sh /usr/lib/ows/queue-locks.sh 644
 adapters/zapret-module.sh /usr/lib/ows/zapret-module.sh 644
 adapters/packages.sh /usr/lib/ows/packages.sh 644
 adapters/zapret-constructor.sh /usr/lib/ows/zapret-constructor.sh 644
