@@ -5,6 +5,6 @@
   "version": "0.1.0",
   "service": "tgws",
   "category": "telegram-proxy",
-  "source": "https://gitlab.com/xyzmean/brb",
+  "source": "https://gitlab.com/xyzmean/brb/-/raw/main/install-tgws.sh",
   "description": "Состояние установленной службы sTGWS."
 }

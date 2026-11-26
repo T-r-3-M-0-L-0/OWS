@@ -137,8 +137,12 @@ if [ "$luci" = 1 ]; then
     [ -r /usr/share/libubox/jshn.sh ] || fail 'Missing dependency: jshn'
     [ -x /etc/init.d/rpcd ] || fail 'LuCI requires the rpcd service'
     for cmd in jsonfilter ubus; do command -v "$cmd" >/dev/null || fail "Missing dependency: $cmd"; done
-    for dir in /usr/libexec/rpcd /usr/share/rpcd/acl.d /usr/share/luci/menu.d /www/luci-static/resources/view; do
+    for dir in /usr/share/rpcd/acl.d /usr/share/luci/menu.d /www/luci-static/resources/view; do
         [ -d "$dir" ] || fail "LuCI directory missing: $dir"
+    done
+    for dir in /usr/libexec /usr/libexec/rpcd; do
+        [ -d "$dir" ] || { [ ! -e "$dir" ] && [ ! -L "$dir" ]; } ||
+            fail "Expected a directory for rpcd: $dir"
     done
 fi
 
@@ -168,6 +172,7 @@ backup=$(mktemp -d /root/ows-upgrade.XXXXXX)
 touched=$backup/changed
 : > "$touched"
 was_running=0 enabled_here=0 service_touched=0 library_created=0 state_created=0
+rpcd_parent_created=0 rpcd_dir_created=0
 if [ "$upgrade" = 1 ] && /etc/init.d/ows status 7>&- 8>&- >/dev/null 2>&1; then was_running=1; fi
 
 atomic_copy() (
@@ -218,6 +223,8 @@ rollback() {
             rm -f "$path" || broken=1
         fi
     done < "$touched"
+    if [ "$rpcd_dir_created" = 1 ]; then rmdir /usr/libexec/rpcd || broken=1; fi
+    if [ "$rpcd_parent_created" = 1 ]; then rmdir /usr/libexec || broken=1; fi
     if [ "$library_created" = 1 ]; then rmdir /usr/lib/ows || broken=1; fi
     if [ "$state_created" = 1 ]; then rmdir /etc/ows || broken=1; fi
     if [ "$luci" = 1 ]; then /etc/init.d/rpcd reload 7>&- 8>&- || broken=1; fi
@@ -233,6 +240,17 @@ rollback() {
 }
 trap rollback EXIT
 trap 'exit 1' HUP INT TERM
+
+if [ "$luci" = 1 ]; then
+    if [ ! -d /usr/libexec ]; then
+        (umask 022; mkdir /usr/libexec)
+        rpcd_parent_created=1
+    fi
+    if [ ! -d /usr/libexec/rpcd ]; then
+        (umask 022; mkdir /usr/libexec/rpcd)
+        rpcd_dir_created=1
+    fi
+fi
 
 if [ "$upgrade" = 1 ]; then
     while read -r source path mode; do

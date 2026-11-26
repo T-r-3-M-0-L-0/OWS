@@ -53,6 +53,9 @@ registry_list() {
             json_get_vars kind service source
             if [ "$kind" = adapter ] && [ "$service" = "$(jsonfilter -i "$builtin" -e '@.service')" ]; then
                 json_get_vars id name version description category
+                case "$id:$source" in
+                    stgws:https://gitlab.com/xyzmean/brb|stgws:https://gitlab.com/xyzmean/brb/) source='' ;;
+                esac
                 if [ -z "$source" ]; then source=$(jsonfilter -i "$builtin" -e '@.source'); fi
                 json_init
                 registry_json

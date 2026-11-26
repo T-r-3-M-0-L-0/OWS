@@ -86,11 +86,14 @@ zapret_module_asset() {
         [.assets[]|select(.name==$name and .size>0 and .size<=25165824)] |
         if length==1 then .[0] else empty end
     ' "$meta") || { echo "В релизе нет файла $name"; return 1; }
-    url=$(printf '%s' "$asset" | jq -er '.browser_download_url')
-    digest=$(printf '%s' "$asset" | jq -er '.digest | select(test("^sha256:[a-f0-9]{64}$"))') ||
+    url=$(printf '%s' "$asset" | jq -er '.browser_download_url | strings') || return 1
+    digest=$(printf '%s' "$asset" | jq -er '
+        .digest | strings | select(length == 71 and startswith("sha256:")) | .[7:] |
+        select((explode - ("0123456789abcdef" | explode)) == [])
+    ') ||
         { echo 'В публикации пакета отсутствует SHA-256'; return 1; }
     zapret_module_fetch "$url" "$dest" || return 1
-    printf '%s  %s\n' "${digest#sha256:}" "$dest" | sha256sum -c -
+    printf '%s  %s\n' "$digest" "$dest" | sha256sum -c -
 }
 
 zapret_module_archive_file() {
@@ -123,7 +126,10 @@ zapret_module_download() (
     work=$(mktemp -d "$RUN/packages/.release.XXXXXX") || exit 1
     trap 'rm -rf "$work"' EXIT
     zapret_module_fetch "https://api.github.com/repos/$repo/releases/latest" "$work/release.json" || exit 1
-    tag=$(jq -er '.tag_name | select(test("^[A-Za-z0-9._-]{1,48}$"))' "$work/release.json") || exit 1
+    tag=$(jq -er '
+        .tag_name | strings | select(length > 0 and length <= 48) |
+        select((explode - ("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-" | explode)) == [])
+    ' "$work/release.json") || { echo 'Некорректный тег релиза Zapret'; exit 1; }
     if [ "$id" = zapret ]; then
         zapret_module_asset "$work/release.json" "zapret_${tag}_${arch}.zip" "$work/release.zip" &&
             zapret_module_archive_file "$work/release.zip" "(^|/)zapret[-_][^/]+\\.$format$" "$work/core.$format" &&

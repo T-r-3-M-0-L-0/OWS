@@ -71,7 +71,7 @@ var defaults = {
     stgws: {
         service: 'tgws',
         group: 'telegram-proxy',
-        sourceLabel: _('Инструкция по установке sTGWS'),
+        sourceLabel: _('Установщик sTGWS'),
         tab: function(entry, context) { return stgws.tab(entry, context.createTabs, context.followJob); }
     }
 };
