@@ -48,6 +48,10 @@ enqueue() (
             . "$LIB/stgws.sh"
             [ "$#" = 1 ] && stgws_action_allowed "$1" || fail 'Unknown sTGWS action'
             ;;
+        install-module)
+            [ "$#" = 1 ] || fail 'Usage: ows install MODULE'
+            case "$1" in steer|netshift|tg-ws-proxy) ;; *) fail 'Unknown module installer' ;; esac
+            ;;
         tg-ws-proxy)
             . "$LIB/tg-ws-proxy.sh"
             [ "$#" = 1 ] && tgws_proxy_action_allowed "$1" || fail 'Unknown Telegram proxy action'
@@ -223,8 +227,19 @@ process_module() {
     (
         (
             export OWS_JOB_RESULT="$JOBS/$id/result.json"
+            case "$kind:$action" in
+                adblock:refresh*|adblock:configure:*|adblock:enable-light|adblock:edit|\
+                steer:refresh-*|steer:test-draft-lists|steer:list-preview:*|steer:edit)
+                    . "$LIB/packages.sh"
+                    ows_ensure_tools curl || exit 1
+                    ;;
+            esac
             case "$kind" in
                 stgws) stgws_execute "$action" ;;
+                install-module)
+                    . "$LIB/release-install.sh"
+                    ows_install_release "$action"
+                    ;;
                 cleanup)
                     . "$LIB/legacy-cleanup.sh"
                     legacy_cleanup_apply "$action"
@@ -490,6 +505,17 @@ worker() {
 
 case "${1:-}" in
     apply) shift; enqueue zapret2 "$@" ;;
+    install)
+        [ "$#" = 2 ] || fail 'Usage: ows install MODULE'
+        case "$2" in
+            steer|netshift|tg-ws-proxy) enqueue install-module "$2" ;;
+            stgws) enqueue stgws install ;;
+            zapret|zapret2) enqueue zapret-module "$2" install-latest ;;
+            doh) enqueue doh install ;;
+            adblock-fast) enqueue adblock install-fast ;;
+            *) fail 'Unknown module installer' ;;
+        esac
+        ;;
     zapret) shift; enqueue zapret-module "$@" ;;
     stgws) shift; enqueue stgws "$@" ;;
     tg-ws-proxy) shift; enqueue tg-ws-proxy "$@" ;;

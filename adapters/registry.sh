@@ -59,7 +59,7 @@ registry_list() {
                 if [ -z "$source" ]; then source=$(jsonfilter -i "$builtin" -e '@.source'); fi
                 json_init
                 registry_json
-                registry_service_installed installed "$service"
+                registry_builtin_state "$service"
                 json_dump
                 separator=,
                 continue
@@ -74,7 +74,7 @@ registry_list() {
         [ -s "$entry" ] && json_load "$(cat "$entry")" || continue
         json_get_var service service
         json_add_string kind adapter
-        registry_service_installed installed "$service"
+        registry_builtin_state "$service"
         printf '%s' "$separator"
         json_dump
         separator=,
@@ -86,6 +86,14 @@ registry_service_installed() {
     local installed=0
     [ ! -x "/etc/init.d/$2" ] || installed=1
     json_add_boolean "$1" "$installed"
+}
+
+registry_builtin_state() {
+    registry_service_installed installed "$1"
+    if [ "$1" = netshift ] && [ -x /etc/init.d/netshift ] &&
+        [ ! -s /usr/share/luci/menu.d/luci-app-netshift.json ]; then
+        json_add_boolean needs_interface 1
+    fi
 }
 
 registry_builtin_path() {

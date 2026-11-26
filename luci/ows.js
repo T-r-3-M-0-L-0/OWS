@@ -24,6 +24,7 @@ var moduleStatus = rpc.declare({ object: 'ows', method: 'module_status', params:
 var modulePreview = rpc.declare({ object: 'ows', method: 'module_preview', params: ['manifest'] });
 var moduleAttach = rpc.declare({ object: 'ows', method: 'module_attach', params: ['manifest'] });
 var moduleLink = rpc.declare({ object: 'ows', method: 'module_link', params: ['name', 'source'] });
+var moduleInstall = rpc.declare({ object: 'ows', method: 'module_install', params: ['id'] });
 
 var labels = {
     idle: _('Нет операций'),
@@ -83,6 +84,7 @@ function statusLabel(result, template) {
         return (parts[0] === 'zapret2' ? 'Zapret2' : 'Zapret') + ' · ' + operation + ' · ' + label;
     }
     if (result.kind === 'dns') return _('Проверка DNS') + ' · ' + label;
+    if (result.kind === 'install-module') return result.action + ' · ' + _('Установка пакетов') + ' · ' + label;
     if (result.kind === 'cleanup') return _('Очистка остатков Zapret-Manager') + ' · ' + label;
     if (result.kind === 'doh') return 'DoH · ' + (result.action === 'install' ? _('Установка пакетов') + ' · ' : '') + label;
     if (result.kind === 'system') {
@@ -523,6 +525,32 @@ return view.extend({
         var workspace = E('div');
         var instructionsTab = templates.panel(instructions.tab());
         var registry = adapterCatalog(renderModules);
+        var installing = Object.create(null);
+
+        function installButton(entry) {
+            var button = E('button', {class:'cbi-button',type:'button'},
+                entry.needs_interface ? _('Установить интерфейс LuCI') : _('Установить'));
+            button.disabled = !!installing[entry.id];
+            button.addEventListener('click', function() {
+                if (installing[entry.id] || !window.confirm(entry.installConfirmation ||
+                    _('Установить %s и необходимые пакеты?').format(entry.name))) return;
+                installing[entry.id] = true;
+                button.disabled = true;
+                moduleInstall(entry.id).then(function(result) {
+                    if (!result || !result.job) throw new Error(result && result.error || _('Установка недоступна'));
+                    followJob(result.job, function() {
+                        delete installing[entry.id];
+                        registry.load();
+                    });
+                }).catch(function(error) {
+                    delete installing[entry.id];
+                    button.disabled = false;
+                    ui.addNotification(null, E('p', {}, error.message), 'error');
+                });
+            });
+            return button;
+        }
+
         var cleanupPanel = templates.panel({id:'legacy-cleanup', content:legacyCleanup.panel(followJob)});
         var systemTabs = createTabs(_('Системные модули'), templates.system(followJob));
         var systemPanel = templates.panel({id:'overview-system',content:E('section', {class:'ows-service-preview'}, [
@@ -548,9 +576,9 @@ return view.extend({
             ].map(function(tab) { return templates.panel(tab); });
             tabs.push(instructionsTab);
             var rows = [
-                {name:'Zapret2',description:_('Движок nfqws2, редактор тактик и конструктор'),tab:1,installed:installed.zapret2,
+                {id:'zapret2',name:'Zapret2',description:_('Движок nfqws2, редактор тактик и конструктор'),tab:1,installed:installed.zapret2,installable:installed.zapret2 === false,
                     open:function() { selectZapretVersion('zapret2', 'zapret2-service'); }},
-                {name:'Zapret',description:_('Первая версия, движок nfqws'),tab:1,installed:installed.zapret,
+                {id:'zapret',name:'Zapret',description:_('Первая версия, движок nfqws'),tab:1,installed:installed.zapret,installable:installed.zapret === false,
                     open:function() { selectZapretVersion('zapret', 'zapret-service'); }},
                 {content:systemPanel.content}
             ];
@@ -581,7 +609,9 @@ return view.extend({
                 tabs.push({ id: id, label: group.label, content: content, activate: open });
             });
             tabs.push(templates.panel(dns.tab(followJob)));
-            rows.push({name:'DoH',description:_('DNS через HTTPS'),tab:tabs.length,installed:installed.doh});
+            rows.push({id:'doh',name:'DoH',description:_('DNS через HTTPS'),tab:tabs.length,
+                installed:installed.doh,installable:installed.doh === false,
+                installConfirmation:_('Установить HTTPS DNS Proxy из репозитория OpenWrt? Пакет может запустить службу и изменить DNS.')});
             tabs.push(templates.panel(doh.tab(followJob)));
             entries.forEach(function(entry) {
                 if (entry.id === 'zapret' || entry.id === 'zapret2') return;
@@ -593,14 +623,16 @@ return view.extend({
                 moduleTemplates[entry.id] = template;
                 entry = Object.assign({}, entry, {
                     name: template.label || entry.name,
-                    sourceLabel: template.releaseInstall ? (entry.installed === false ? _('Установить из релиза') : _('Релизы')) :
-                        template.sourceLabel
+                    sourceLabel: template.sourceLabel,
+                    installable: !!template.install && (entry.installed === false || entry.needs_interface),
+                    installConfirmation: template.installConfirmation
                 });
                 var tab = (template.tab && template.tab(entry, context, template)) || adapterTab(entry);
-                if (entry.sourceLabel) {
-                    var source = entrySource(entry, entry.sourceLabel);
-                    if (source) tab.content = [E('p', {}, source)].concat(tab.content);
-                }
+                var source = entrySource(entry, entry.sourceLabel);
+                var actions = [];
+                if (entry.installable && template.installInTab) actions.push(installButton(entry));
+                if (source && entry.sourceLabel) actions.push(source);
+                if (actions.length) tab.content = [E('div', {class:'ows-actions'}, actions)].concat(tab.content);
                 tab = templates.panel(tab);
                 var group = groups[template.group];
                 var top = group ? group.index : tabs.length;
@@ -625,10 +657,9 @@ return view.extend({
             registry.list.replaceChildren.apply(registry.list, rows.map(function(entry) {
                 if (entry.content) return entry.content;
                 var actions = [];
-                var template = moduleTemplates[entry.id] || {};
+                if (entry.installable) actions.push(installButton(entry));
                 if (entry.tab != null) {
-                    var open = E('button', { class: 'cbi-button', type: 'button' },
-                        entry.installed === false && !template.releaseInstall ? _('Установить') : _('Открыть'));
+                    var open = E('button', { class: 'cbi-button', type: 'button' }, _('Открыть'));
                     open.addEventListener('click', function() {
                         if (entry.open) entry.open();
                         modules.select(entry.tab);

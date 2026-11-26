@@ -504,9 +504,11 @@ adblock_live_edit() (
     local draft=$1 active=$2 input=$3 work
     work=$(mktemp -d /tmp/ows-adblock-edit.XXXXXX) || exit 1
     trap 'rm -rf "$work"' EXIT
-    jq -e --arg rev "${active##*/}" '
+    jq -L /usr/lib/ows -e --arg rev "${active##*/}" '
+        include "ows-json";
         type=="object" and .revision==$rev and (.allow|type=="string") and (.block|type=="string") and
-        (.devices|type=="array" and length<=64 and all(.[]; type=="string" and test("^[0-9a-fA-F]{2}([:-][0-9a-fA-F]{2}){5}$")))
+        (.devices|type=="array" and length<=64 and all(.[]; type=="string" and
+            (ascii_downcase | split("-") | join(":") | mac_address(":"))))
     ' "$input" >/dev/null || adblock_draft_error 'Настройки изменились или запрос некорректен. Обновите страницу.'
     jq -r '.allow' "$input" | adblock_domain_lines yes > "$work/allow" &&
         jq -r '.block' "$input" | adblock_domain_lines yes > "$work/block" ||

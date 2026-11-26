@@ -38,7 +38,16 @@ adapters/network-handover.sh /usr/lib/ows/network-handover.sh 644
 adapters/legacy-cleanup.sh /usr/lib/ows/legacy-cleanup.sh 644
 adapters/queue-locks.sh /usr/lib/ows/queue-locks.sh 644
 adapters/zapret-module.sh /usr/lib/ows/zapret-module.sh 644
+adapters/zapret2-reference.sh /usr/lib/ows/zapret2-reference.sh 644
+modules/zapret2/zapret2-safe.sh /usr/lib/ows/zapret2-safe.sh 755
+modules/zapret2/defaults/profiles.uci /usr/lib/ows/zapret2-default-profiles.uci 644
+modules/zapret2/defaults/zapret-testlib.lua /usr/lib/ows/zapret2-default-zapret-testlib.lua 644
+modules/zapret2/defaults/tls_clienthello_www_sferum_ru.bin /usr/lib/ows/zapret2-default-tls_clienthello_www_sferum_ru.bin 644
+modules/zapret2/tools/tspu-test /usr/lib/ows/tspu-test 755
+modules/zapret2/tools/TSPU-CLASS-TEST-LICENSE /usr/lib/ows/TSPU-CLASS-TEST-LICENSE 644
 adapters/packages.sh /usr/lib/ows/packages.sh 644
+adapters/ows-json.jq /usr/lib/ows/ows-json.jq 644
+adapters/release-install.sh /usr/lib/ows/release-install.sh 644
 adapters/zapret-constructor.sh /usr/lib/ows/zapret-constructor.sh 644
 adapters/zapret-presets.sh /usr/lib/ows/zapret-presets.sh 644
 adapters/dns.sh /usr/lib/ows/dns.sh 644
@@ -70,6 +79,19 @@ openwrt/stgws-route.sh /usr/lib/ows/stgws-route.sh 644
 bin/ows /usr/sbin/ows 755
 openwrt/ows.init /etc/init.d/ows 755
 FILES
+    local asset
+    for asset in "$SRC"/modules/zapret2/ui/*; do
+        printf 'modules/zapret2/ui/%s /usr/lib/ows/zapret2-ui-%s 644\n' "${asset##*/}" "${asset##*/}"
+    done
+    for asset in "$SRC"/modules/zapret2/defaults/lists/*.txt; do
+        printf 'modules/zapret2/defaults/lists/%s /usr/lib/ows/zapret2-list-%s 644\n' "${asset##*/}" "${asset##*/}"
+    done
+    for asset in "$SRC"/modules/zapret2/defaults/presets/*.txt; do
+        printf 'modules/zapret2/defaults/presets/%s /usr/lib/ows/zapret2-preset-%s 644\n' "${asset##*/}" "${asset##*/}"
+    done
+    for asset in "$SRC"/modules/zapret2/tools/*.sh; do
+        printf 'modules/zapret2/tools/%s /usr/lib/ows/%s 755\n' "${asset##*/}" "${asset##*/}"
+    done
     if [ "$luci" = 1 ]; then
         cat <<'FILES'
 adapters/zapret2-editor.sh /usr/lib/ows/zapret2-editor.sh 644
@@ -122,9 +144,9 @@ FILES
 
 [ "$(id -u)" = 0 ] || fail 'Install as root'
 [ -x /etc/rc.common ] || fail 'OpenWrt init system is required'
-for cmd in uci flock pgrep cmp mktemp dd sha256sum tail; do
-    command -v "$cmd" >/dev/null || fail "Missing dependency: $cmd"
-done
+[ -s "$SRC/adapters/packages.sh" ] || fail 'Missing adapters/packages.sh'
+. "$SRC/adapters/packages.sh"
+required_tools='uci flock pgrep cmp mktemp dd sha256sum tail jq timeout'
 if [ "$upgrade" = 1 ]; then
     [ -x /usr/sbin/ows ] && [ -x /etc/init.d/ows ] && [ -d /etc/ows ] ||
         fail 'OWS must be installed before upgrading'
@@ -134,9 +156,8 @@ else
         [ ! -e /usr/lib/ows ] && [ ! -L /usr/lib/ows ] || fail 'OWS data or libraries already exist'
 fi
 if [ "$luci" = 1 ]; then
-    [ -r /usr/share/libubox/jshn.sh ] || fail 'Missing dependency: jshn'
     [ -x /etc/init.d/rpcd ] || fail 'LuCI requires the rpcd service'
-    for cmd in jsonfilter ubus; do command -v "$cmd" >/dev/null || fail "Missing dependency: $cmd"; done
+    required_tools="$required_tools jshn jsonfilter ubus"
     for dir in /usr/share/rpcd/acl.d /usr/share/luci/menu.d /www/luci-static/resources/view; do
         [ -d "$dir" ] || fail "LuCI directory missing: $dir"
     done
@@ -149,7 +170,7 @@ fi
 files=$(file_list)
 while read -r source path mode; do
     [ -s "$SRC/$source" ] || fail "Missing $source"
-    case "$source" in *.sh|*.init|*.rpc|bin/ows) sh -n "$SRC/$source" || exit 1 ;; esac
+    case "$source" in *.sh|*.init|*.rpc|bin/ows|*/tspu-test) sh -n "$SRC/$source" || exit 1 ;; esac
     if [ "$mode" = keep ]; then continue; fi
     if [ -L "$path" ] || { [ -e "$path" ] && { [ "$upgrade" = 0 ] || [ ! -f "$path" ]; }; }; then
         fail "Unexpected existing path: $path"
@@ -159,14 +180,24 @@ $files
 EOF
 [ ! -L /etc/ows ] && [ ! -L /usr/lib/ows ] || fail 'OWS directories must not be symlinks'
 upgrade_ready
-[ "$check" = 0 ] || { echo 'OWS preflight OK'; exit 0; }
+if [ "$check" = 1 ]; then
+    missing=$(ows_missing_packages $required_tools) || exit 1
+    if [ -n "$missing" ]; then
+        ows_package_format >/dev/null || fail 'OpenWrt package manager is required to install dependencies'
+        printf 'Packages to install: %s\n' "$(printf '%s' "$missing" | tr '\n' ' ')"
+    fi
+    echo 'OWS preflight OK'
+    exit 0
+fi
 
+ows_ensure_tools flock || exit 1
 exec 7>/var/lock/ows-install.lock
 flock -n 7 || fail 'Another OWS installation is running'
 mkdir -p /tmp/ows
 exec 8>/tmp/ows/submit.lock
 flock -n 8 || fail 'OWS is receiving a job'
 upgrade_ready
+ows_ensure_tools $required_tools 7>&- 8>&- || exit 1
 
 backup=$(mktemp -d /root/ows-upgrade.XXXXXX)
 touched=$backup/changed

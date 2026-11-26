@@ -93,13 +93,15 @@ steer_info() {
         else
             echo null
         fi
-    } | jq -cs --arg version "$version" --argjson installed "$installed" --argjson running "$running" \
+    } | jq -L /usr/lib/ows -cs --arg version "$version" --argjson installed "$installed" --argjson running "$running" \
         --argjson spec "$spec" --argjson diag "$diag" --argjson vless "$vless" --argjson hy2 "$hy2" --argjson proxy "$proxy" \
         --argjson migration "$migration" --argjson handover "$handover" --argjson subscription "$subscription" \
         --argjson draft_apply "$draft_apply" \
         --slurpfile labels /usr/lib/ows/steer-outputs.json '
+        include "ows-json";
         def token:
-            if type=="string" and test("^[A-Za-z0-9_:.@-]{1,128}$") then . else null end;
+            if type=="string" and length>0 and length<=128 and ascii_allowed(ascii_alnum + "_:.@-")
+            then . else null end;
         def tokens:
             [(. // []) | arrays | .[:64][] | token | select(. != null)];
         def managed:
@@ -107,12 +109,11 @@ steer_info() {
         def has_entries:
             type=="array" and length>0;
         def display_name:
-            strings | gsub("[[:cntrl:]]";"") | .[:100] | select(length>0);
+            strings | strip_controls | .[:100] | select(length>0);
         def dns_endpoint:
-            [strings | match("^([A-Za-z][A-Za-z0-9+.-]*)://([^/?#]+)") |
-             {scheme:.captures[0].string,
-              host:(.captures[1].string | split("@")[-1] |
-                    select(test("^[A-Za-z0-9_:.\\[\\]-]{1,255}$")))}][0];
+            [strings | url_parts |
+             {scheme:.scheme, host:(.authority | split("@")[-1] |
+                    select(length>0 and length<=255 and ascii_allowed(ascii_alnum + "_:.[]-")))}][0];
         .[1] as $runtime | .[0] |
         managed as $managed |
         {
@@ -153,7 +154,7 @@ steer_info() {
                 features: ($runtime.features | tokens)
             },
             outputs: [ (.outputs // {}) | objects | to_entries[:64][] |
-                select(.key | test("^[A-Za-z0-9_][A-Za-z0-9_-]{0,63}$")) |
+                select(.key | identifier(64)) |
                 .key as $id | ($runtime.outputs[$id] // {}) as $actual |
                 {
                     id: $id, label: ($labels[0][$id] // $id), kind: (.value.kind | token), protocol: (.value.protocol | token),

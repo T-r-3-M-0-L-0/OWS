@@ -2,6 +2,8 @@
 
 ZC_CONTROL=/root/zapret2-tools/strategy-check-control.sh
 ZC_DNS=/root/zapret2-tools/dns-learning.sh
+[ -x "$ZC_CONTROL" ] || ZC_CONTROL=/usr/lib/ows/strategy-check-control.sh
+[ -x "$ZC_DNS" ] || ZC_DNS=/usr/lib/ows/dns-learning.sh
 ZC_HEALTH=/opt/zapret2/healthcheck.sh
 ZC_RUNS=/tmp/zapret2-strategy-ui
 
@@ -276,7 +278,7 @@ zapret_constructor_state() (
             if [ ! -r /tmp/zhealth-latest.tsv ]; then echo '{"rows":[]}'; exit 0; fi
             sed -n '2,81p' /tmp/zhealth-latest.tsv | jq -Rsc '
                 {rows:[split("\n")[]|select(length>0)|split("\t")|
-                    {domain:(.[2]|sub("^https?://";"")|split("/")[0]|split("@")[-1]),
+                    {domain:(.[2]|ltrimstr("https://")|ltrimstr("http://")|split("/")[0]|split("@")[-1]),
                      kind:.[1],state:.[3],http:.[4],route:.[5]}]}'
             ;;
         profiles)

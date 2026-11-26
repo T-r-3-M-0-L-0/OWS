@@ -14,12 +14,17 @@ var defaults = {
     steer: {
         service: 'steer',
         group: 'vpn',
-        releaseInstall: true
+        install: true,
+        installInTab: true,
+        sourceLabel: _('Релизы')
     },
     netshift: {
         service: 'netshift',
         group: 'vpn',
-        releaseInstall: true,
+        install: true,
+        installInTab: true,
+        sourceLabel: _('Релизы'),
+        installConfirmation: _('Установить NetShift и его зависимости, включая sing-box? Пакет может изменить маршрутизацию и настройки DNS.'),
         renderStatus: function(data, actions) {
             return [
                 E('p', {}, !data.installed ? _('NetShift не установлен') : data.running ?
@@ -39,7 +44,9 @@ var defaults = {
     'tg-ws-proxy': {
         service: 'tg-ws-proxy',
         group: 'telegram-proxy',
-        releaseInstall: true,
+        install: true,
+        installInTab: true,
+        sourceLabel: _('Релизы'),
         tab: function(entry, context, template) { return serviceView.tab(entry, context.followJob, template); },
         statusMethod: 'tg_proxy_info',
         actionMethod: 'tg_proxy_action',
@@ -63,6 +70,8 @@ var defaults = {
     'adblock-fast': {
         service: 'adblock-fast',
         label: _('Блокировка рекламы'),
+        install: true,
+        installConfirmation: _('Установить AdBlock Fast из репозитория OpenWrt? Пакет может запустить фильтрацию.'),
         native: { route: 'adblock-fast', acl: 'luci-app-adblock-fast' },
         tab: function(entry, context, template) {
             return dns.adblockTab(entry, context, template.native);
@@ -71,7 +80,8 @@ var defaults = {
     stgws: {
         service: 'tgws',
         group: 'telegram-proxy',
-        sourceLabel: _('Установщик sTGWS'),
+        install: true,
+        sourceLabel: _('Скрипт автора'),
         tab: function(entry, context) { return stgws.tab(entry, context.createTabs, context.followJob); }
     }
 };

@@ -5,7 +5,6 @@
 
 var info = rpc.declare({ object: 'ows', method: 'stgws_info' });
 var execute = rpc.declare({ object: 'ows', method: 'stgws_action', params: ['action'] });
-var installCommand = 'wget -qO- https://gitlab.com/xyzmean/brb/-/raw/main/install-tgws.sh | sh';
 
 return baseclass.extend({
     tab: function(entry, createTabs, follow) {
@@ -77,12 +76,9 @@ return baseclass.extend({
             packages.replaceChildren(
                 E('p', {}, data.available ? _('Версии в репозиториях') + ' · ' + data.available
                     : _('Пакет tgws пока не найден в локальном индексе.')),
-                !installed ? E('div', {}, [
-                    E('p', {}, _('Установщик автора скачает отдельный пакет tgws для архитектуры роутера и подберёт формат APK или IPK. Выполните по SSH от root.')),
-                    E('pre', {class:'ows-job-output'}, installCommand)
-                ]) : '',
+                !installed ? E('p', {}, _('OWS скачает пакет sTGWS для архитектуры роутера в формате APK или IPK.')) : '',
                 E('div', { class: 'ows-actions' }, [
-                    action(_('Установить из репозитория'), 'install', installed || !data.manager, _('Установить tgws из настроенного репозитория?')),
+                    action(_('Установить sTGWS'), 'install', installed || !data.manager, _('Установить sTGWS и запустить службу?')),
                     action(_('Обновить'), 'update', !installed || !data.available, _('Обновить пакет tgws?')),
                     action(_('Переустановить'), 'reinstall', !installed || !data.available, _('Переустановить пакет tgws?')),
                     action(_('Удалить пакет'), 'remove', !installed || !data.manager, _('Удалить пакет tgws? Мост перестанет обслуживать соединения.'))

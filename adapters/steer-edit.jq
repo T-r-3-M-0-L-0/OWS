@@ -1,3 +1,5 @@
+include "ows-json";
+
 def pick($value; $allowed):
     if ($allowed | index($value)) != null then $value else error("unsupported option") end;
 def choice($value):
@@ -6,7 +8,7 @@ def smallint($value):
     if ($value|type) == "number" and $value >= 0 and $value <= 86400 and $value == ($value|floor)
     then $value else error("invalid integer") end;
 def macs:
-    if type=="array" and length<=256 and all(.[]; type=="string" and test("^([0-9a-f]{2}:){5}[0-9a-f]{2}$"))
+    if type=="array" and length<=256 and all(.[]; type=="string" and mac_address(":"))
     then unique else error("invalid device group") end;
 def generated:
     .name as $n | ["OWS: bypass devices","OWS: device exceptions","OWS: full VPN","OWS: exclusions"] | index($n) != null;
@@ -38,7 +40,8 @@ elif $c.type=="service_custom" then
     choice($c.output) as $out |
     if $domains=="" or ($c.name|type)!="string" or
         ($c.name|length)<1 or ($c.name|length)>100 or
-        ($c.name|test("^[[:space:]]*$|[[:cntrl:]]|^OWS:")) then error("invalid service name")
+        ($c.name | startswith("OWS:") or (explode | all(.[]; whitespace_code) or any(.[]; control_code)))
+    then error("invalid service name")
     else
         .lists[$service_key]={domains_file:[$domains]} |
         .rules += ([{name:$c.name, to:[$service_key], out:$out}] |

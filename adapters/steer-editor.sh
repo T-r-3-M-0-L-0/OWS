@@ -42,7 +42,8 @@ steer_editor_devices() {
         if [ -r /tmp/dhcp.leases ]; then
             awk 'NF>=4 {print tolower($2),$3,$4}' /tmp/dhcp.leases
         fi
-        jq -r '.lan.devices[]? | select(type=="string" and test("^[A-Za-z0-9_.:-]{1,15}$"))' "$edit_spec" |
+        jq -L /usr/lib/ows -r 'include "ows-json";
+            .lan.devices[]? | strings | select(length>0 and length<=15 and ascii_allowed(ascii_alnum + "_.:-"))' "$edit_spec" |
             while IFS= read -r dev; do
                 ip neigh show dev "$dev" 2>/dev/null |
                     awk '{for(i=2;i<NF;i++) if($i=="lladdr") print tolower($(i+1)),$1,"-"}'
@@ -63,7 +64,7 @@ steer_editor_state() (
             policy:($policy[0] // {mode:"all",devices:[],full:[],full_output:"",exclusions:""}),
             outputs:[.outputs|to_entries[] |
                 {id:.key, label:($labels[0][.key] // .key), kind:.value.kind, protocol:.value.protocol,
-                 route:(if (.value.kind=="warp" or (.key|test("^zm_?warp"))) then "warp"
+                 route:(if (.value.kind=="warp" or (.key|startswith("zmwarp") or startswith("zm_warp"))) then "warp"
                         elif .value.kind=="group" or .value.kind=="tunnel" then "vpn"
                         elif (.value.kind|IN("interface","xsteer","awg")) then "tunnel" else .value.kind end),
                  on_fail:(.value.on_fail // "drop"),
@@ -90,10 +91,11 @@ steer_editor_parser() {
 }
 
 steer_subscription_nodes() {
-    timeout 12 steer "$parser-nodes" "$subfile" 2>/dev/null | jq -ce '
+    timeout 12 steer "$parser-nodes" "$subfile" 2>/dev/null | jq -L /usr/lib/ows -ce '
+        include "ows-json";
         [(.nodes|arrays)[] | select((.index|type)=="number" and .index>=0 and .index==(.index|floor)) |
-            {index, name:((.name // "") | gsub("[[:cntrl:]]";"") |
-                if test("://") then "" else .[:120] end)}]'
+            {index, name:((.name // "") | strip_controls |
+                if contains("://") then "" else .[:120] end)}]'
 }
 
 steer_editor_nodes() (
@@ -234,7 +236,7 @@ steer_editor_save() (
             fi
             ;;
         catalog_service)
-            id=$(jq -er '.id | strings | select(test("^[A-Za-z0-9_][A-Za-z0-9_-]{0,79}$"))' "$1") || exit 1
+            id=$(jq -L /usr/lib/ows -er 'include "ows-json"; .id | strings | select(identifier(80))' "$1") || exit 1
             jq -e --arg id "$id" --slurpfile change "$1" '
                 (.outputs | has($change[0].output)) and
                 ((.lists // {}) | has($id) | not)
@@ -260,7 +262,7 @@ steer_editor_save() (
     [ ! -s "$workspace/exclude-ip.txt" ] || ex_ips=$workspace/exclude-ip.txt
     catalog=/dev/null
     [ "$change" != catalog_service ] || catalog=$workspace/catalog-service.json
-    if ! jq --slurpfile change "$1" --slurpfile policy "$workspace/policy.json" --slurpfile catalog_service "$catalog" --arg domains "$domain" \
+    if ! jq -L /usr/lib/ows --slurpfile change "$1" --slurpfile policy "$workspace/policy.json" --slurpfile catalog_service "$catalog" --arg domains "$domain" \
         --arg ex_domains "$ex_domains" --arg ex_ips "$ex_ips" --arg service_key "ows_service_${workspace##*.}" \
         -f /usr/lib/ows/steer-edit.jq "$edit_spec" > "$workspace/spec.json" 2>"$workspace/error"; then
         if grep -q 'existing per-device' "$workspace/error"; then

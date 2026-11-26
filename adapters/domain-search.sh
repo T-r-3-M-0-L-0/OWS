@@ -99,11 +99,12 @@ scan_file() {
 
 tab=$(printf '\t')
 spec=/etc/steer/spec.json
-if [ -r "$spec" ] && [ "$(wc -c < "$spec")" -le 1048576 ] && jq -er '
-    (.lists // {}) | to_entries[] | select(.key|test("^[A-Za-z0-9_.-]+$")) |
+if [ -r "$spec" ] && [ "$(wc -c < "$spec")" -le 1048576 ] && jq -L /usr/lib/ows -er '
+    include "ows-json";
+    (.lists // {}) | to_entries[] | select(.key | length>0 and ascii_allowed(ascii_alnum + "_.-")) |
     .key as $id | .value |
     (.domains_file // [] | if type=="array" then .[] else . end | strings |
-     select(test("^/[A-Za-z0-9_./@+-]+$")) | [$id,.] | @tsv)
+     select(startswith("/") and length>1 and ascii_allowed(ascii_alnum + "_./@+-")) | [$id,.] | @tsv)
 ' "$spec" > "$work/steer-files"; then
     available="$available steer"
     while IFS="$tab" read -r id path; do scan_file steer text "$id" "$path"; done < "$work/steer-files"
@@ -113,9 +114,10 @@ if [ -r "$spec" ] && [ "$(wc -c < "$spec")" -le 1048576 ]; then
         {name:(.name // ""), out:(.out // ""), active:(.enabled!=false and .disabled!=true),
          lists:(.to | if type=="array" then map(strings) else [strings] end)}]' "$spec" > "$work/rules" 2>/dev/null ||
         printf '[]\n' > "$work/rules"
-    jq -r '(.lists // {}) | to_entries[] | select(.key|test("^[A-Za-z0-9_.-]+$")) |
+    jq -L /usr/lib/ows -r 'include "ows-json";
+        (.lists // {}) | to_entries[] | select(.key | length>0 and ascii_allowed(ascii_alnum + "_.-")) |
         .key as $id | .value.domains[]? | strings |
-        select(test("^[A-Za-z0-9_.=*: -]+$")) | [$id,.] | @tsv' "$spec" > "$work/inline" 2>/dev/null
+        select(length>0 and ascii_allowed(ascii_alnum + "_.=*: -")) | [$id,.] | @tsv' "$spec" > "$work/inline" 2>/dev/null
     if [ -s "$work/inline" ]; then
         available="$available steer"
         scan_text inline steer '' "$work/inline"

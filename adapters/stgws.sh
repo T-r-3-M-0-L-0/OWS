@@ -73,7 +73,7 @@ stgws_package() {
     fi
     stgws_backup || return 1
     case "$manager:$action" in
-        apk:install|opkg:install) . /usr/lib/ows/packages.sh; ows_install_repo_packages tgws ;;
+        apk:install|opkg:install) . "$LIB/release-install.sh"; ows_install_release stgws ;;
         apk:update) apk upgrade tgws ;;
         apk:reinstall) apk fix --reinstall tgws ;;
         apk:remove) apk del tgws ;;
@@ -88,8 +88,9 @@ stgws_package() {
         }
         return 0
     fi
-    [ -x "$STGWS_INIT" ] && "$STGWS_INIT" enable &&
-        "$STGWS_INIT" restart && stgws_wait
+    [ -x "$STGWS_INIT" ] && "$STGWS_INIT" enable || return 1
+    if [ "$action" = install ] && stgws_running; then return 0; fi
+    "$STGWS_INIT" restart && stgws_wait
 }
 
 stgws_pick() (

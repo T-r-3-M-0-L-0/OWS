@@ -149,7 +149,7 @@ EOF
     [ -s "$listdir/base.dom" ] || rm -f "$listdir/base.dom"
     rm -f "$listdir/raw" "$listdir/meta"
     find "$listdir" -maxdepth 1 -type f | sort | jq -Rsc --arg id "$id" --arg name "$name" '
-        split("\n") | map(select(test("\\.(dom|pfx|srs)$"))) | select(length>0) |
+        split("\n") | map(select(endswith(".dom") or endswith(".pfx") or endswith(".srs"))) | select(length>0) |
         group_by(split(".")[-1]) | map({key:(.[0] | split(".")[-1] |
             if .=="dom" then "domains_file" elif .=="pfx" then "prefixes_file" else "srs" end),value:.}) |
         {id:$id, name:$name, list:from_entries}' > "$work/catalog-service.json" &&

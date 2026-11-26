@@ -97,6 +97,7 @@ return baseclass.extend({
             return info(id).then(function(data) {
                 if (!data || data.error || data.id !== id) throw new Error();
                 var installAction = data.downloaded ? 'install' : 'install-latest';
+                var packageSupported = !data.reference_arch || data.reference_arch === data.arch;
                 panel.replaceChildren(
                     E('p', {}, [
                         data.installed ? _('Установлен') + (data.version ? ' · ' + data.version : '') : _('Служба не установлена'),
@@ -104,21 +105,27 @@ return baseclass.extend({
                         data.enabled ? ' · ' + _('автозапуск включён') : ''
                     ]),
                     E('p', {}, [
-                        E('a', {href:'https://github.com/' + data.repository + '/releases',target:'_blank',rel:'noopener noreferrer'},
+                        E('a', {href:data.release_url || 'https://github.com/' + data.repository + '/releases',target:'_blank',rel:'noopener noreferrer'},
                             data.repository), data.arch ? ' · ' + data.arch : '', data.format ? ' · ' + data.format : '',
+                        data.reference_version ? ' · ' + data.reference_version : '',
                         data.downloaded ? ' · ' + _('Скачан релиз') + ' ' + data.downloaded : ''
                     ]),
+                    data.reference_mismatch ? E('p', {role:'status'},
+                        _('Установлена другая сборка Zapret2. Для перехода на Routerich потребуется перенос конфигурации.')) : '',
+                    !packageSupported ? E('p', {role:'status'},
+                        _('Для этой архитектуры пока нет сборки со штатным интерфейсом OWS.')) : '',
                     E('p', {}, data.native_view ? _('Штатный интерфейс LuCI доступен') :
                         _('Штатный интерфейс LuCI не найден')),
                     data.conflict ? E('p', {}, _('Другой движок запущен или включён в автозапуск') + ' · ' + data.conflict) : '',
                     actions([
                         !data.installed ? control(_('Установить'), installAction,
-                            data.arch && data.format && !data.conflict,
+                            data.arch && data.format && !data.conflict && packageSupported,
                             _('Установить движок и штатный интерфейс LuCI?')) : '',
                         data.installed && !data.native_view ?
-                            control(_('Установить штатный интерфейс'), installAction, data.format && (data.downloaded || data.arch),
+                            control(_('Установить штатный интерфейс'), installAction,
+                                !data.reference_mismatch && data.format && (data.downloaded || data.arch),
                                 _('Установить пакет штатного интерфейса LuCI?')) : '',
-                        control(_('Скачать пакеты'), 'download', data.arch && data.format),
+                        control(_('Скачать пакеты'), 'download', data.arch && data.format && packageSupported),
                         data.installed ? control(_('Запустить'), 'start', !data.running && !data.conflict) : '',
                         data.installed ? control(_('Остановить'), 'stop', data.running,
                             _('Остановить рабочую службу?')) : '',

@@ -1,0 +1,1443 @@
+#!/bin/sh
+# ============================================================
+#  TSPU test - CLI-ядро приложения luci-app-tspu-test
+#  Запуск «класс-теста ТСПУ» (ядро tspu-class-test v2.9) через
+#  blockcheck2 из /opt/zapret2. Определяет, какие механики
+#  десинхронизации пропускает ТСПУ провайдера (34 стратегии,
+#  TLS 1.2 + 1.3, SCANLEVEL=force), печатает вердикт «КЛАСС ТСПУ».
+#
+#  Команды:
+#    tspu-test start [ДОМЕН(Ы)] [ПОВТОРОВ] [ОЖИДАНИЕ_С] [ipv6]  фоновый запуск (4-й арг: "ipv6" = прогон и по IPv6)
+#        несколько доменов - через пробел, каждый тестируется отдельно
+#    tspu-test stop                                      остановить (Zapret2 вернётся)
+#    tspu-test status                                    строки state=/progress=/elapsed=/alive=
+#    tspu-test log                                       показать вывод текущего/последнего теста
+#    tspu-test clearlog                                  очистить файл вывода
+#    tspu-test _run DOM REP TMO                          (внутренняя, фоновая)
+#
+#  Файлы (только /tmp, самоуничтожаются при перезагрузке):
+#    /tmp/tspu_test.status    - состояние для LuCI
+#    /tmp/tspu_test_run.log   - вывод теста (показывается в LuCI)
+#    /tmp/tspu_test.pid       - PID фонового процесса
+#    /tmp/class_test.log(.short), /tmp/class_report.txt, /tmp/list_stage1.txt
+#
+#  Конфигурация Zapret2 не изменяется. На время теста служба zapret2
+#  останавливается и запускается обратно по завершении/остановке/сбою.
+# ============================================================
+
+STATUS=/tmp/tspu_test.status
+RUNLOG=/tmp/tspu_test_run.log
+PIDF=/tmp/tspu_test.pid
+LIST=/tmp/list_stage1.txt
+AWKF=/tmp/class_report.awk
+
+pid_alive() {
+	[ -f "$PIDF" ] && kill -0 "$(cat "$PIDF" 2>/dev/null)" 2>/dev/null
+}
+
+do_start() {
+	DOM=${1:-www.youtube.com}
+	REP=${2:-3}
+	TMO=${3:-2.5}
+	# Домен(ы): допускается несколько через пробел
+	echo "$DOM" | grep -qE '^[A-Za-z0-9.-]+( [A-Za-z0-9.-]+)*$' || { echo "state=error msg=invalid domain"; exit 1; }
+	case "$DOM" in -*) echo "state=error msg=invalid domain"; exit 1 ;; esac
+	case "$REP" in *[!0-9]*) REP=3 ;; esac
+	[ "$REP" -gt 10 ] && REP=10
+	case "$TMO" in *[!0-9.]*) TMO=2.5 ;; esac
+	# 4-й аргумент (ipv6-проба) подставляется в строку sh -c - только литерал 0/1
+	case "${4:-0}" in 1) IP6=1 ;; *) IP6=0 ;; esac
+	if pid_alive; then echo "state=running"; exit 0; fi
+	# Тест и валидатор оба останавливают Zapret2 и запускают blockcheck2 -
+	# параллельно они ломают друг другу nfqueue/правила и состояние службы
+	if val_alive; then echo "state=error msg=идёт валидация - дождитесь её окончания"; exit 1; fi
+	if [ ! -f /opt/zapret2/blockcheck2.sh ]; then
+		echo "state=error msg=Zapret2 not found in /opt/zapret2"
+		exit 1
+	fi
+	command -v curl >/dev/null 2>&1 || { echo "state=error msg=curl not found"; exit 1; }
+	command -v awk >/dev/null 2>&1 || { echo "state=error msg=awk not found"; exit 1; }
+	echo "state=starting" > "$STATUS"
+	# Фоновый запуск без nohup/setsid: rpcd (LuCI) и dropbear не рассылают
+	# HUP своим фоновым детям с перенаправленным stdio - процесс живёт.
+	/bin/sh -c "/usr/bin/tspu-test _run \"$DOM\" \"$REP\" \"$TMO\" \"$IP6\" > $RUNLOG 2>&1 &"
+	sleep 1
+	if pid_alive; then
+		echo "state=started"
+	else
+		echo "state=error msg=failed to start"
+		head -n 5 "$RUNLOG" 2>/dev/null
+		exit 1
+	fi
+}
+
+do_stop() {
+	# Сначала TERM (не kill -9): раннер должен успеть выполнить trap cleanup
+	# и запустить Zapret2 обратно. kill -9 первым шагом убивал раннер мимо trap -
+	# после «Остановить» Zapret2 оставался выключенным (ревью 2.5, п.1.3).
+	if pid_alive; then kill "$(cat "$PIDF" 2>/dev/null)" 2>/dev/null; fi
+	# Страховка: TERM по runner-процессу срабатывает на его trap (v7) -
+	# blockcheck2 останавливается, Zapret2 запускается обратно.
+	kill $(pgrep -f '[t]spu-test _run') 2>/dev/null
+	# Обёртка blockcheck2 на случай, если trap раннера не успел её убить
+	kill $(pgrep -f '[b]lockcheck2.sh') 2>/dev/null
+	# Дать trap-у время вернуть Zapret2 (замер dedikar на AX3000: раннер
+	# завершается сам за 5-6 с — trap останавливает blockcheck2 и запускает
+	# zapret2; при 3 с kill -9 приходил посреди этой очистки); не умер - добить
+	i=0
+	while [ $i -lt 12 ] && pid_alive; do sleep 1; i=$((i+1)); done
+	if pid_alive; then
+		kill -9 "$(cat "$PIDF" 2>/dev/null)" 2>/dev/null
+		kill -9 $(pgrep -f '[t]spu-test _run') 2>/dev/null
+		kill -9 $(pgrep -f '[b]lockcheck2.sh') 2>/dev/null
+	fi
+	sleep 1
+	rm -f "$PIDF"
+	# Если раннер всё же умер мимо trap - вернуть Zapret2 по флагу, который
+	# раннер ставит, когда сам останавливал службу
+	if [ -f /tmp/tspu_test.was ]; then
+		pgrep -f '[b]lockcheck2.sh' >/dev/null 2>&1 || /etc/init.d/zapret2 start >/dev/null 2>&1
+		rm -f /tmp/tspu_test.was
+	fi
+	echo "state=stopped" > "$STATUS"
+	# Маркер в логе: LuCI разблокирует кнопки, увидев его (лог без
+	# «конца отчёта» после остановки выглядел бы как идущий тест)
+	echo "=== ТЕСТ ОСТАНОВЛЕН ПОЛЬЗОВАТЕЛЕМ ===" >> "$RUNLOG" 2>/dev/null
+	echo "state=stopped"
+}
+
+do_status() {
+	if pid_alive; then
+		cat "$STATUS" 2>/dev/null
+		echo "alive=1"
+	else
+		rm -f "$PIDF" 2>/dev/null
+		cat "$STATUS" 2>/dev/null
+		echo "alive=0"
+	fi
+	# Есть ли сформированные логи (для кнопок скачивания в LuCI)
+	[ -s /tmp/class_test.log.short ] && echo "haslog=1" || echo "haslog=0"
+}
+
+# ============================================================
+# Оценка чемпиона в мини-повторе по версиям TLS (ревью 2.5, п.1.2):
+# чемпион проверяется только на тех версиях, для которых был РЕКОМЕНДОВАН
+# (раньше требовались обе - чемпион «только TLS 1.3» всегда «умирал» на TLS 1.2
+# и давал ложный вердикт «адаптивный»). Счётчик сбрасывается на ЛЮБОЙ строке
+# «- ...» и на «clearing»: иначе AVAILABLE из «- IP block tests» следующего
+# блока засчитывался предыдущей стратегии (ревью 2.5, п.1.1).
+# $1=номер строки $2=стратегия $3=лог мини-скана; CHVER = «N:12 N:13»
+rt_champ_ok() {
+	RES=$(awk -v pat="nfqws2 $2" '
+		index($0, pat) > 0 { f = 1; v = ($0 ~ /curl_test_https_tls13/) ? 13 : 12; next }
+		/^- / || /^clearing/ { f = 0 }
+		f && /^!!!!! AVAILABLE !!!!!/ { c[v]++ }
+		END { printf "%d %d", c[12] + 0, c[13] + 0 }' "$3" 2>/dev/null)
+	RT_A12=${RES%% *}; RT_A13=${RES##* }
+	RT_NV=""
+	for CV in $CHVER; do [ "${CV%%:*}" = "$1" ] && RT_NV="$RT_NV ${CV#*:}"; done
+	RT_NV=$(echo $RT_NV)
+	if [ -z "$RT_NV" ]; then
+		RT_NEED="любая"
+		[ "${RT_A12:-0}" -ge 1 ] || [ "${RT_A13:-0}" -ge 1 ]
+		return
+	fi
+	RT_NEED=$(echo "$RT_NV" | tr ' ' '\n' | sort -u | tr '\n' ' ' | sed 's/12/1.2/g; s/13/1.3/g; s/ $//')
+	for V in $RT_NV; do
+		case "$V" in
+			12) [ "${RT_A12:-0}" -ge 1 ] || return 1 ;;
+			13) [ "${RT_A13:-0}" -ge 1 ] || return 1 ;;
+		esac
+	done
+	return 0
+}
+
+#  Фоновый раннер: ядро tspu-class-test v2.9.
+#  Несколько доменов = несколько последовательных прогонов blockcheck2,
+#  у каждого свой лог, ИТОГ и секция отчёта (blockcheck2 принимает
+#  только один домен за прогон).
+# ============================================================
+do_run() {
+	DOM=${1:-www.youtube.com}
+	REP=${2:-3}
+	TMO=${3:-2.5}
+	WANT6=${4:-}
+	S=$LIST
+	A=$AWKF
+	L=/tmp/class_test.log
+	RFULL=/tmp/class_report.txt
+	SCRIPT_VER="TSPU test ows-routerich-1.0.7-r2 (ядро tspu-class-test v2.9): 34 стратегии, IPv6-проба, проверка адаптивности, SCANLEVEL=force"
+
+	echo $$ > "$PIDF"
+
+	TTY=0
+	[ -t 1 ] && TTY=1
+	prog() { # $1=DONE $2=TOTAL $3=ELAPSED $4=ДОМЕН
+		if [ "$TTY" = 1 ]; then
+			printf '\r  Стратегий проверено: %s из %s, прошло %s. Домен: %s   ' "$1" "$2" "$3" "$4"
+		else
+			echo "state=running progress=$1/$2 elapsed=$3 domain=$4" > "$STATUS"
+		fi
+	}
+
+	# Баннер — СРАЗУ в лог: пользователь видит, что тест жив,
+	# а последующие строки-этапы локализуют место любого зависания
+	echo "В данный момент производится тестирование сети, пожалуйста подождите (обычно несколько минут)..."
+	[ -f "$S" ] || { echo "Не найден файл со списком: $S"; exit 1; }
+	S=$(readlink -f "$S") || { echo "Не удалось определить полный путь к списку: $S"; exit 1; }
+
+	[ -f /opt/zapret2/blockcheck2.sh ] || { echo "Не найден /opt/zapret2/blockcheck2.sh: Zapret2 не установлен?"; exit 1; }
+	command -v curl >/dev/null 2>&1 || { echo "Не найден curl: blockcheck2 без него не работает."; exit 1; }
+	command -v awk >/dev/null 2>&1 || { echo "Не найден awk."; exit 1; }
+	# DNS-проверка каждого домена: узлы googlevideo ВРЕМЕННЫЕ и региональные,
+	# обычные домены проверяем фолбэком через публичный DNS
+	DNSFAIL_LIST=""
+	for D in $DOM; do
+		nslookup "$D" >/dev/null 2>&1 && continue
+		DNSFAIL_LIST="$DNSFAIL_LIST $D"
+		case "$D" in
+			*googlevideo*)
+				echo "ВНИМАНИЕ: узел $D не резолвится. Записи узлов googlevideo ВРЕМЕННЫЕ и региональные:"
+				echo "  - имя могло устареть: Google ротирует узлы, возьмите свежий из DevTools (F12 -> Network -> videoplayback) и тестируйте сразу;"
+				echo "  - либо ваш DNS не обслуживает узлы Google Global Cache."
+				echo "  Надёжный обход - закрепить узел в /etc/hosts:"
+				echo "    1) IP узла = Remote Address соединения videoplayback в DevTools (колонка Remote Address);"
+				echo "    2) echo \"<IP> $D\" >> /etc/hosts"
+				echo "    3) повторите тест в приложении;"
+				echo "    4) после теста удалите запись: sed -i '\\|$D|d' /etc/hosts"
+				;;
+			*)
+				PIP=$(nslookup "$D" 8.8.8.8 2>/dev/null | sed -n 's/^Address [0-9][0-9]*: \([0-9a-fA-F.:]\+\).*/\1/p' | head -n 1)
+				if [ -n "$PIP" ]; then
+					echo "ВНИМАНИЕ: $D не резолвится вашим DNS, но публичный 8.8.8.8 даёт IP: $PIP."
+					echo "  Обход: echo \"$PIP $D\" >> /etc/hosts и повторите тест - проблема в локальной резолвилке (fake-ip/rebind-защита/фильтр)."
+				else
+					echo "ВНИМАНИЕ: $D не резолвится (ни локально, ни 8.8.8.8). Проверьте имя и отключите VPN, иначе тест будет неверным."
+				fi
+				;;
+		esac
+	done
+
+	cat > $A <<'AWK'
+function norm(x) { gsub(/\r/, "", x); gsub(/[ \t]+/, " ", x); sub(/^ /, "", x); sub(/ $/, "", x); return x }
+NR==FNR { x = norm($0); if (x != "" && substr(x, 1, 1) != "#") { n++; lst[n] = x } next }
+/^- curl_test_https_tls1[23] ipv[46] / {
+  cur = ""
+  i = index($0, " : nfqws2 ")
+  if (i > 0) {
+    head = substr($0, 1, i - 1); s = norm(substr($0, i + 10))
+    sub(/^- curl_test_https_/, "", head); split(head, h, " "); p = h[1]
+    if (h[3] != "") DOMN = h[3]
+    for (k = 1; k <= n; k++) if (lst[k] == s) { cur = k; key = p SUBSEP k; tot[key] = 0; ok[key] = 0; part[key] = 0; seen = 1 }
+  }
+  next
+}
+/^\* / || /^clearing/ || /^!!!!! curl/ { cur = ""; next }
+rep == 1 && /^curl: / {
+  if (cur != "" && match($0, /with [0-9]+ bytes received/)) { b = substr($0, RSTART + 5, RLENGTH - 20) + 0; if (b > 0) part[key] = 1 }
+  next
+}
+rep == 1 && /^!!!!! AVAILABLE !!!!!/ { if (cur != "") { tot[key] = 1; ok[key] = 1 } next }
+rep == 1 && /^UNAVAILABLE/ { if (cur != "") tot[key] = 1; next }
+/^\[attempt [0-9]+\]/ {
+  if (cur != "") {
+    tot[key]++
+    if ($0 ~ /AVAILABLE/) ok[key]++
+    else if (match($0, /with [0-9]+ bytes received/)) { b = substr($0, RSTART + 5, RLENGTH - 20) + 0; if (b > 0) part[key]++ }
+  }
+  next
+}
+END {
+  if (!seen) { print "ВНИМАНИЕ: в логе нет строк из вашего списка. Пришлите краткий лог."; exit }
+  np = split("tls12 tls13", P, " "); slowany = 0; rec_any = 0
+  for (q = 1; q <= np; q++) {
+    p = P[q]; st = ""; fl = ""; sl = ""; det = ""
+    for (k = 1; k <= n; k++) {
+      key = p SUBSEP k
+      if (key in tot && tot[key] > 0) {
+        det = det sprintf(" %d:%d/%d%s", k, ok[key], tot[key], (part[key] > 0 ? "~" part[key] : ""))
+        if (ok[key] == tot[key]) st = st " " k
+        else if (ok[key] > 0) fl = fl " " k
+        else if (part[key] > 0) { sl = sl " " k; slowany = 1 }
+      }
+    }
+    printf "%s стабильно:%s | нестабильно:%s | медленно:%s\n", p, (st == "" ? " нет" : st), (fl == "" ? " нет" : fl), (sl == "" ? " нет" : sl)
+    printf "   попытки (строка:успешных/всего, ~N = N попыток, где данные пошли, но не успели загрузиться):%s\n", det
+    S[p] = st; F[p] = fl; M[p] = sl; D[p] = det
+    # Вердикт класса ТСПУ. Техника и фулинг разделены: 1-6 - нарезка без фейков,
+    # 7-10 - голый фейк с разными фулингами (md5/ttl/badsum/SNI), 11-16 - фейк + нарезка,
+    # 17 - двухпакетный hello (имитация kyber-браузера), 18-19 - 7-точечный шред,
+    # 20-21 - badsum-фейк внутри нарезки (механика дробилки), 22 - seqovl=1,
+    # 23 - двухсторонний шред (payload=all - режется и ответ сервера).
+    dis = ""; spl = ""; fk = ""; cb = ""; cut = ""
+    for (k = 1; k <= 34; k++) if (index(st " ", " " k " ") > 0) {
+      if (k <= 6 || k == 17 || k == 18 || k == 19 || k == 22 || k == 23) cut = cut " " k
+      if (k == 1 || k == 4 || k == 6 || k == 19) dis = dis " " k
+      else if (k == 2 || k == 5 || k == 17 || k == 18 || k == 22 || k == 23) spl = spl " " k
+      else if (k >= 7 && k <= 10) fk = fk " " k
+      else if (k != 3) cb = cb " " k
+    }
+    if (st == "") {
+      if (fl != "" || sl != "") V[p] = "не определён (нестабильно/медленно) - повторите с ожиданием 8 с и повторами 5"
+      else V[p] = "не определён (не прошло ни одной строки)"
+    } else if (dis != "" && spl != "") {
+      V[p] = "L0-: нарезка пробивает и без фейков, хватит простого разреза (строки" cut ")"
+      if (index(spl " ", " 2 ") == 0 && index(spl " ", " 17 ") == 0) V[p] = V[p] "; чистый multisplit (2) ТСПУ склеивает - прямому разрезу помогает seqovl (5)"
+    }
+    else if (dis != "") V[p] = "L0: обратный порядок пробивает, прямой ТСПУ склеивает - достаточно multidisorder (строки" cut ")"
+    else if (spl != "") {
+      V[p] = "аномалия: прямой разрез пробивает (строки" cut "), а обратный порядок ТСПУ собирает - опирайтесь на multisplit/seqovl"
+      if (index(spl " ", " 2 ") == 0 && index(spl " ", " 17 ") == 0) V[p] = V[p] "; прямой - только с seqovl (5)"
+    }
+    else if (cb != "") V[p] = "L2: нарезка проходит только вместе с фейком (строки" cb ")"
+    else if (fk != "") V[p] = "особый: ТСПУ верит голому фейку (строки" fk "), но режет нарезку"
+    else if (index(st " ", " 32 ") > 0 || index(st " ", " 33 ") > 0 || index(st " ", " 34 ") > 0) V[p] = "особый: прошли только новые механики (32-34: клон-фейк, send-эхо) - корпусная классификация для них не определена"
+    else V[p] = "особый: прошла только строка 3 (разрез на границе SLD) - используйте pos=sld"
+    nt = ""
+    if (fk != "") nt = nt "Строки" fk ": ТСПУ ВЕРИТ фейковому ClientHello (решение принимается по фейку), сервер отбрасывает фейк по фулингу. "
+    if (fk == "" && cb != "" && (dis != "" || spl != "")) nt = nt "Голые фейки (7-10) отсекаются: фейк полезен только вместе с нарезкой (прошли" cb "). "
+    if (index(st " ", " 3 ") > 0 && dis == "") nt = nt "Разрез на границе SLD (3) проходит без внутреннего - годится pos=sld. "
+    if (dis != "" && index(st " ", " 3 ") == 0) nt = nt "Разрез на границе SLD (3) не проходит - работают разрезы внутри слова SLD (midsld) и ведущий байт (pos=1,...). "
+    if (index(st " ", " 17 ") > 0) nt = nt "Строка 17 (двухпакетный hello) прошла: у браузеров hello двухпакетный (kyber), эта строка ближе всего к браузерному поведению - результат переносится на браузер охотнее однопакетных. "
+    srd = ""
+    if (index(st " ", " 18 ") > 0) srd = srd " 18"
+    if (index(st " ", " 19 ") > 0) srd = srd " 19"
+    if (srd != "") nt = nt "7-точечный шред прошёл (строки" srd "): разрезы по всем границам SNI сразу - ресборка ТСПУ не может выбрать точку склейки. "
+    bd = ""
+    if (index(st " ", " 20 ") > 0) bd = bd " 20"
+    if (index(st " ", " 21 ") > 0) bd = bd " 21"
+    if (bd != "") nt = nt "badsum-пара внутри нарезки + 7-шред прошла (строки" bd ") - механика дробилки: примеси сбивают классификацию ТСПУ. "
+    if (index(st " ", " 23 ") > 0) nt = nt "Строка 23 (payload=all) прошла: режется и ответ сервера (двухсторонний десинк) - ломает и классификацию по ServerHello. "
+    nsd = ""
+    for (kn = 24; kn <= 31; kn++) if (index(st " ", " " kn " ") > 0) nsd = nsd " " kn
+    if (nsd != "") nt = nt "Шумовая серия дробилки (строки" nsd ") прошла: дозы и позиции badsum-примесей отработали - персональная дробилка соберётся из ваших данных. "
+    cl = ""
+    if (index(st " ", " 32 ") > 0) cl = cl " 32"
+    if (index(st " ", " 33 ") > 0) cl = cl " 33"
+    if (cl != "") nt = nt "Клон-фейк (строки" cl ") прошёл: фейк с КЛОНИРОВАННЫМ ClientHello клиента не отсекается по содержимому - сильный фулинг там, где голый и стандартный фейк детектируются. "
+    if (index(st " ", " 34 ") > 0) nt = nt "Send-эхо (строка 34) прошла: неизменённые копии hello дошли до сервера, а мёртвые сегменты стали шумом для DPI. "
+    if (st == "" && fl == "" && sl == "") nt = nt "Ни одна строка не прошла. Если первый прогон этого домена был зелёным, а живой поток умирал через 5-15 с - ТСПУ АДАПТИВНЫЙ: он разогрет реальным трафиком и режет соединения с узлом независимо от стратегии. Подождите 5-10 минут (охлаждение) и повторите - зелёный результат может вернуться. "
+    NT[p] = nt
+    # РЕКОМЕНДАЦИЯ: одна минимально достаточная строка по классу
+    # (L0-/L0 - обратный порядок; аномалия - seqovl/двухпакетный; L2 - комбо; особый - голый фейк)
+    rec = ""
+    # 32-34 в приоритете (раньше цикл шёл до 31 - строки 32-34 никогда не рекомендовались)
+    npri = split("1 4 6 5 22 17 2 18 19 20 21 24 25 26 27 28 29 30 31 11 12 13 14 15 16 33 32 34 23 7 8 9 10 3", PRI, " ")
+    for (pi = 1; pi <= npri && rec == ""; pi++) {
+      rk = PRI[pi]
+      if (index(st " ", " " rk " ") > 0) rec = rk
+    }
+    REC[p] = rec
+    if (rec != "") rec_any = 1
+  }
+  split("TLS 1.2|TLS 1.3", LBL, "|")
+  for (q = 1; q <= np; q++) {
+    p = P[q]
+    printf "КЛАСС ТСПУ (%s): %s\n", LBL[q], V[p]
+    if (NT[p] != "") printf "   %s\n", NT[p]
+    if (REC[p] != "") {
+      printf "РЕКОМЕНДАЦИЯ (%s): начните со строки %s - скопируйте её в настройку стратегий Zapret2 и проверьте в браузере (Инкогнито):\n", LBL[q], REC[p]
+      printf "   %s\n", lst[REC[p]]
+    }
+  }
+  if (index(DOMN, "googlevideo") > 0) print "Проверка реальности (узел googlevideo): зелёный скан НЕ гарантирует живое видео - скан это короткие curl-транзакции, а ТСПУ может резать длинный видеопоток через 5-15 с (адаптивная классификация по совокупности пакетов). Итог проверяйте воспроизведением видео. Если видео умирает при зелёном скане - нужна механика сильнее скана: дробилка (вариант 5/7 генератора, payload=all)."
+  if (rec_any) print "ПОДСКАЗКА: если сайт открывается, а видео тормозит - прогоните тест отдельно по узлу googlevideo и добавьте его строку второй (DevTools -> Network -> videoplayback)."
+  if (rpt != "") {
+    split("TLS 1.2|TLS 1.3", LBL, "|")
+    for (q = 1; q <= np; q++) {
+      p = P[q]
+      printf "%s: стабильно:%s | нестабильно:%s | медленно:%s\n", LBL[q], (S[p] == "" ? " нет" : S[p]), (F[p] == "" ? " нет" : F[p]), (M[p] == "" ? " нет" : M[p]) > rpt
+    }
+    for (q = 1; q <= np; q++) printf "Попытки %s (строка:успешных/всего):%s\n", LBL[q], D[P[q]] > rpt
+    for (q = 1; q <= np; q++) {
+      printf "КЛАСС ТСПУ (%s): %s\n", LBL[q], V[P[q]] > rpt
+      if (NT[P[q]] != "") printf "   %s\n", NT[P[q]] > rpt
+      if (REC[P[q]] != "") {
+        printf "РЕКОМЕНДАЦИЯ (%s): строка %s:\n   %s\n", LBL[q], REC[P[q]], lst[REC[P[q]]] > rpt
+      }
+    }
+    if (index(DOMN, "googlevideo") > 0) print "Проверка реальности (узел googlevideo): зелёный скан НЕ гарантирует живое видео - скан это короткие curl-транзакции, а ТСПУ может резать длинный видеопоток через 5-15 с (адаптивная классификация по совокупности пакетов). Итог проверяйте воспроизведением видео. Если видео умирает при зелёном скане - нужна механика сильнее скана: дробилка (вариант 5/7 генератора, payload=all)." > rpt
+    print "Рабочие стратегии (прошли все попытки):" > rpt
+    any = 0
+    for (k = 1; k <= n; k++) {
+      a = index(S["tls12"] " ", " " k " ") > 0; b = index(S["tls13"] " ", " " k " ") > 0
+      if (a || b) { printf "%d [%s]: %s\n", k, (a && b ? "TLS 1.2 и 1.3" : (a ? "только TLS 1.2" : "только TLS 1.3")), lst[k] > rpt; any = 1 }
+    }
+    if (!any) print "нет" > rpt
+    close(rpt)
+  }
+  if (slowany) print "ПОДСКАЗКА: у строк «медленно» соединение установилось и данные пошли, но не успели загрузиться за отведённое время. Это не блокировка. Увеличьте «Ожидание» до 8 с и повторите."
+}
+AWK
+
+	WAS=0
+	pgrep nfqws2 >/dev/null 2>&1 && WAS=1
+	CLEANED=0
+	BPID=
+
+	cleanup() {
+		[ "$CLEANED" = 1 ] && return
+		CLEANED=1
+		if [ -n "$BPID" ] && kill -0 "$BPID" 2>/dev/null; then
+			kill "$BPID" 2>/dev/null
+			wait "$BPID" 2>/dev/null
+		fi
+		[ "$TTY" = 1 ] && echo
+		rm -f /tmp/tspu_test.was
+		if [ "$WAS" = 1 ]; then
+			if /etc/init.d/zapret2 start >/dev/null 2>&1; then
+				echo "Zapret2 снова запущен."
+			else
+				echo "ВНИМАНИЕ: не удалось запустить Zapret2. Выполните вручную: /etc/init.d/zapret2 start"
+			fi
+		fi
+	}
+	trap cleanup EXIT
+	trap 'cleanup; exit 130' INT TERM HUP
+
+	if [ "$WAS" = 1 ]; then
+		echo "Останавливаю Zapret2 на время теста..."
+		touch /tmp/tspu_test.was
+		/etc/init.d/zapret2 stop >/dev/null 2>&1
+	fi
+	cd /opt/zapret2 || exit 1
+	CURLV=$(curl -V 2>/dev/null | sed -n 1p)
+	NV=""
+	for b in ./nfq2/nfqws2 ./nfqws2 "$(command -v nfqws2 2>/dev/null)"; do
+		[ -n "$b" ] && [ -x "$b" ] || continue
+		NV=$("$b" --version 2>/dev/null | sed -n 1p)
+		[ -n "$NV" ] && break
+	done
+
+	NLINES=$(grep -cvE '^[[:space:]]*(#|$)' "$S")
+	NUMDOM=$(echo "$DOM" | wc -w)
+	# IPv6-проба: глобальная v6-адресация и маршрут по умолчанию обязательны
+	NFAMS=1
+	FAMS="ipv4"
+	if [ "$WANT6" = "ipv6" ]; then
+		if ip -6 route show default 2>/dev/null | grep -q . && ip -6 addr show scope global 2>/dev/null | grep -qw inet6; then
+			FAMS="$FAMS ipv6"
+			NFAMS=2
+		else
+			echo "IPv6: глобального адреса или маршрута по умолчанию нет - IPv6-проба пропущена (тест только по IPv4)."
+		fi
+	fi
+	TOTAL=$(( NLINES * 2 * NUMDOM * NFAMS ))
+	# Оценка времени - откалибрована по реальным прогонам (REP=1: 100с, REP=3: 275с):
+	# ~12 с подготовки + ~1.4 с на попытку при ожидании 2.5 с (успешные проходят быстро,
+	# полный таймаут горят только неудачные). Диапазон - честный коридор.
+	ESTS=$(awk -v n="$NLINES" -v r="$REP" -v d="$NUMDOM" -v f="$NFAMS" -v t="$TMO" 'BEGIN { printf "%d", 12 + (n*2*f*r*d + 6) * (0.35*t+0.55) }')
+	ESTLO=$(( ESTS / 60 ))
+	ESTHI=$(( ESTLO + 1 ))
+	echo "Оценка времени: примерно ${ESTLO}-${ESTHI} мин (стратегий: $NLINES, повторов: $REP, ожидание: ${TMO} с, доменов: $NUMDOM; реальное время зависит от того, сколько стратегий проходит)."
+	T0=$(date +%s)
+	DOMNUM=0
+
+	: > $L
+	: > $RFULL
+
+	for CURDOM in $DOM; do
+		DOMNUM=$((DOMNUM+1))
+		case " $DNSFAIL_LIST " in *" $CURDOM "*) DNSFAIL=1 ;; *) DNSFAIL=0 ;; esac
+		rm -f /tmp/class_report.d$DOMNUM /tmp/class_report.d$DOMNUM.ipv*
+
+		echo
+		echo "=== ИТОГ (домен: $CURDOM, повторов: $REP, ожидание: $TMO с) ==="
+		echo "=== ДОМЕН $DOMNUM из $NUMDOM: $CURDOM ===" >> $RFULL
+		IPLBL="IPv4"
+		[ "$NFAMS" = 2 ] && IPLBL="IPv4+IPv6"
+		echo "Тест: $CURDOM, повторов $REP, ожидание $TMO с, $IPLBL, SCANLEVEL=force" >> $RFULL
+
+		for FAM in $FAMS; do
+			IPVS=${FAM#ipv}
+			DLF=/tmp/class_test.log.d$DOMNUM.$FAM
+			RLF=/tmp/class_report.d$DOMNUM.$FAM
+			rm -f "$DLF" "$RLF"
+
+			BATCH=1 SCANLEVEL=force TEST=custom LIST_HTTPS_TLS12=$S LIST_HTTPS_TLS13=$S DOMAINS="$CURDOM" IPVS=$IPVS ENABLE_HTTP=0 ENABLE_HTTPS_TLS12=1 ENABLE_HTTPS_TLS13=1 ENABLE_HTTP3=0 REPEATS=$REP CURL_HTTPS_GET=1 CURL_MAX_TIME="$TMO" ./blockcheck2.sh > "$DLF" 2>&1 &
+			BPID=$!
+			while kill -0 "$BPID" 2>/dev/null; do
+				DONE_D=$(cat /tmp/class_test.log.d$DOMNUM.ipv4 /tmp/class_test.log.d$DOMNUM.ipv6 2>/dev/null | grep -c '^- curl_test_https_tls1[23] .* : nfqws2 ')
+				# На один домен идёт NLINES стратегий x 2 протокола x NFAMS версий IP
+				[ "$DONE_D" -gt $(( NLINES * 2 * NFAMS )) ] 2>/dev/null && DONE_D=$(( NLINES * 2 * NFAMS ))
+				DONE=$(( (DOMNUM-1) * NLINES * 2 * NFAMS + DONE_D ))
+				EL=$(( $(date +%s) - T0 ))
+				ELF=$(printf '%d:%02d' $((EL / 60)) $((EL % 60)))
+				prog "$DONE" "$TOTAL" "$ELF" "$CURDOM ($FAM)"
+				# Статус для LuCI обновляется и при терминальном запуске -
+				# иначе страница показывает «Готово» при живом тесте
+				echo "state=running progress=$DONE/$TOTAL elapsed=$EL domain=$CURDOM" > "$STATUS"
+				sleep 2
+			done
+			wait "$BPID" 2>/dev/null
+
+			cat "$DLF" >> $L
+
+			FAMLBL=$(echo "$FAM" | tr 'a-z' 'A-Z')
+			if [ "$NFAMS" = 2 ]; then
+				echo
+				echo "=== РЕЗУЛЬТАТЫ $FAMLBL ==="
+			fi
+			if [ "$FAM" = "ipv6" ] && ! grep -q "curl_test_https_tls12 ipv6" "$DLF" 2>/dev/null; then
+				echo "IPv6: домен не резолвится по AAAA или v6-связность отсутствует - пробы не выполнялись."
+				continue
+			fi
+
+			NB12=0; NB13=0
+			grep -q "curl_test_https_tls12 .*working without bypass" "$DLF" && NB12=1
+			grep -q "curl_test_https_tls13 .*working without bypass" "$DLF" && NB13=1
+
+			if [ $NB12 = 1 ] && [ $NB13 = 1 ]; then
+				echo "Результат: $CURDOM открывается без обхода (стратегии всё равно проверены, SCANLEVEL=force)."
+				echo "ВНИМАНИЕ: $CURDOM открывается и без обхода. Сканирование шло в режиме SCANLEVEL=force, стратегии проверены."
+				echo "Если тормозит или не грузится видео - дело обычно в видеодомене googlevideo.com, а не в www.youtube.com."
+				echo "Результат: $CURDOM открывается без обхода (стратегии всё равно проверены, SCANLEVEL=force)." > "$RLF"
+			elif ! grep -q "^\* SUMMARY" "$DLF"; then
+				echo "ТЕСТ НЕ ЗАВЕРШИЛСЯ (в логе нет блока SUMMARY). Пришлите краткий лог."
+				echo "Результат: тест не завершился (в логе нет блока SUMMARY)." > "$RLF"
+			else
+				awk -v rep="$REP" -v rpt="$RLF" -f $A $S "$DLF"
+				AWKRC=$?
+				# Ошибки nfqws2-функций в логе (ревью 2.5 §5: строки 32-34 давали 0/5 на
+				# мягком узле, где весь корпус 5/5 - это не отклик ТСПУ, а «desync function
+				# 'send'/'tls_client_hello_clone' does not exist»: nfqws2 не запускался,
+				# попытки шли БЕЗ обхода). Показываем как несовместимость, не как провал.
+				MISSF=$(grep -oE "desync function '[^']+' does not exist" "$DLF" 2>/dev/null | sed "s/desync function '//; s/' does not exist//" | sort -u | tr '
+' ' ')
+				if [ -n "$MISSF" ]; then
+					MISP=" $MISSF"
+					ML=""
+					case "$MISP" in *" tls_client_hello_clone "*) ML="$ML 32 33" ;; esac
+					case "$MISP" in *" send "*) ML="$ML 34" ;; esac
+					echo "ВНИМАНИЕ: в lua-скриптах вашей версии zapret2 нет функций:${MISSF}."
+					if [ -n "$ML" ]; then
+						echo "Строки корпуса$ML показаны «не прошла», но это НЕ отклик ТСПУ - nfqws2 не запускался с ними (попытки шли без обхода). Обновите zapret2 до свежей версии."
+						echo "ВНИМАНИЕ: строки корпуса$ML НЕ ПОДДЕРЖИВАЮТСЯ вашей версией zapret2 (в lua нет функций:${MISSF}) - «не прошла» для них означает несовместимость, а не отклик ТСПУ. Обновите zapret2." >> "$RLF"
+					fi
+					echo "Обновите zapret2 до свежей версии (lua-скрипты), после чего повторите тест - эти строки будут проверены честно."
+				fi
+				[ -s "$RLF" ] || echo "Результат: в логе нет строк из списка." > "$RLF"
+				if [ "$DNSFAIL" = 1 ]; then
+					if [ $AWKRC -ne 0 ]; then
+						echo "Тест не выполнялся: домен не резолвится - blockcheck2 требует рабочую резолвилку. Используйте обход /etc/hosts из ВНИМАНИЕ выше и повторите."
+					fi
+					echo "Примечание: домен не резолвился - тест мог не выполняться; обход - /etc/hosts (см. ВНИМАНИЕ в логе теста)." >> "$RLF"
+				fi
+				if [ $NB12 = 1 ]; then
+					echo "TLS 1.2: открывается без обхода (стратегии всё равно проверены, SCANLEVEL=force)."
+					echo "TLS 1.2: открывается без обхода (стратегии всё равно проверены)." >> "$RLF"
+				fi
+				if [ $NB13 = 1 ]; then
+					echo "TLS 1.3: открывается без обхода (стратегии всё равно проверены, SCANLEVEL=force)."
+					echo "TLS 1.3: открывается без обхода (стратегии всё равно проверены)." >> "$RLF"
+				fi
+			fi
+			if [ -f "$RLF" ]; then
+				if [ "$NFAMS" = 2 ]; then echo "=== РЕЗУЛЬТАТЫ $FAMLBL ===" >> $RFULL; fi
+				# RLF не удалять здесь: из него после цикла собираются чемпионы
+				# для проверки адаптивности (удаляется в конце итерации домена)
+				cat "$RLF" >> $RFULL
+			fi
+		done
+
+		# Проверка адаптивности: мгновенный re-test чемпионов (строки РЕКОМЕНДАЦИЙ).
+		# Адаптивный ТСПУ режет повторные соединения после разогрева реальным трафиком:
+		# зелёный скан + мёртвый мгновенный повтор = вердикт «адаптивный».
+		CHAMP=""
+		for RF in /tmp/class_report.d$DOMNUM.*; do
+			[ -f "$RF" ] || continue
+			for CV in $(sed -n 's/^РЕКОМЕНДАЦИЯ (TLS 1\.\([23]\)): строка \([0-9]\+\):.*/\2:1\1/p' "$RF" 2>/dev/null); do
+				CN=${CV%%:*}
+				CHVER="$CHVER $CV"
+				case " $CHAMP " in *" $CN "*) ;; *) CHAMP="$CHAMP $CN" ;; esac
+			done
+		done
+		[ -z "$CHAMP" ] && CHAMP=$(sed -n 's/^\([0-9]\+\) \[.*/\1/p' /tmp/class_report.d$DOMNUM.ipv4 2>/dev/null | head -n 3 | tr '\n' ' ')
+		CHAMP=$(echo $CHAMP | tr ' ' '\n' | sort -un | head -n 3 | tr '\n' ' ')
+		CHAMP=$(echo $CHAMP)
+		if [ -n "$CHAMP" ]; then
+			CHN=$(echo $CHAMP | wc -w)
+			TOTAL=$(( TOTAL + CHN * 2 ))
+			IP0=${FAMS%% *}; IP0=${IP0#ipv}
+			MINI=/tmp/class_minilist.d$DOMNUM
+			MDLF=/tmp/class_test.log.d$DOMNUM.rt
+			# Нормализованный список БЕЗ комментариев: awk нумерует строки именно так
+			# (комментарии в начале файла списка сбивали sed - по номеру файла брался
+			# комментарий вместо стратегии, мини-список получался пустым для blockcheck2)
+			NORM=/tmp/class_normlist.d$DOMNUM
+			grep -vE '^[[:space:]]*(#|$)' "$S" > "$NORM"
+			: > "$MINI"
+			for CN in $CHAMP; do sed -n "${CN}p" "$NORM" >> "$MINI"; done
+			# curl-проба HS-стиль (min_bytes-критерий): обёртка пишет метрики
+			# каждой попытки (версия/код/байт/время) - контроль данных после рукопожатия
+			CURLW=/tmp/tspu_curl_probe
+			MF=/tmp/tspu_curl_metrics.d$DOMNUM
+			cat > "$CURLW" <<'PWRAP'
+#!/bin/sh
+# Гейт: перехватываем ТОЛЬКО timed-GET к домену теста. DoH-проверка, контрольные
+# домены и прочие вызовы идут verbatim (фидбек 2.5: без гейта JSON-ответ DoH
+# подменялся временем и blockcheck2 прерывался на «all DoH servers failed»).
+real_curl=/usr/bin/curl
+url=
+for a in "$@"; do case "$a" in https://*) url=$a ;; esac; done
+host=${url#*://}; host=${host%%/*}
+case " $TSPU_CURL_DOMAIN " in *" $host "*) ;; *) exec "$real_curl" "$@" ;; esac
+case "$*" in *'%{time_total}'*) ;; *) exec "$real_curl" "$@" ;; esac
+out=$("$real_curl" "$@" --write-out '\nTSPU|%{http_code}|%{size_download}|%{time_total}' 2>/dev/null)
+code=$?
+line=$(printf '%s\n' "$out" | grep '^TSPU|' | tail -n 1)
+if [ -n "$line" ]; then
+	rest=${line#TSPU|}; c2=${rest%%|*}; rest=${rest#*|}; b=${rest%%|*}; rest=${rest#*|}; t=${rest##*|}
+	ver=
+	for a in "$@"; do case "$a" in --tlsv1.2) ver=1.2 ;; --tlsv1.3) ver=1.3 ;; esac; done
+	[ -n "$url" ] && printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$(date '+%H:%M:%S')" "${ver:-?}" "$c2" "$b" "$t" "$url" >> "$TSPU_CURL_METRICS"
+	printf '%s' "$t"
+	exit $code
+fi
+printf '%s' "$out"
+exit $code
+PWRAP
+			chmod +x "$CURLW"
+			: > "$MF"
+			export TSPU_CURL_METRICS="$MF"
+			export TSPU_CURL_DOMAIN="$CURDOM"
+			BATCH=1 SCANLEVEL=force TEST=custom LIST_HTTPS_TLS12=$MINI LIST_HTTPS_TLS13=$MINI DOMAINS="$CURDOM" IPVS=$IP0 ENABLE_HTTP=0 ENABLE_HTTPS_TLS12=1 ENABLE_HTTPS_TLS13=1 ENABLE_HTTP3=0 REPEATS=1 CURL_HTTPS_GET=1 CURL_MAX_TIME="$TMO" CURL="$CURLW" ./blockcheck2.sh > "$MDLF" 2>&1
+			cat "$MDLF" >> $L
+			# Статус для LuCI: прогресс заморожен на время мини-прогона - поясняем почему
+			EL=$(( $(date +%s) - T0 ))
+			echo "state=running progress=$DONE/$TOTAL elapsed=$EL domain=$CURDOM (проверка адаптивности)" > "$STATUS"
+			RT_OK=""; RT_DIED=""; RT_BROKEN=""
+			for CN in $CHAMP; do
+				# ВАЖНО: не $A - эта переменная хранит путь к awk-программе парсера,
+				# затирание ломало парс СЛЕДУЮЩЕГО домена (awk -f <стратегия>)
+				RA=$(sed -n "${CN}p" "$NORM")
+				# Гвард целостности: 0 вхождений строки в лог мини-скана = скан
+				# прервался ДО проверки стратегии (DoH/сеть) - это НЕ «умерла»
+				SL=$(grep -cF -- "nfqws2 $RA" "$MDLF" 2>/dev/null)
+				if [ "${SL:-0}" -eq 0 ]; then
+					RT_BROKEN="$RT_BROKEN $CN"
+				elif rt_champ_ok "$CN" "$RA" "$MDLF"; then
+					RT_OK="$RT_OK $CN"
+				else
+					RT_DIED="$RT_DIED $CN"
+				fi
+			done
+			rm -f "$MINI"
+			echo
+			echo "=== ПРОВЕРКА АДАПТИВНОСТИ ТСПУ ==="
+			echo "Что это: сразу после основного скана приложение мгновенно повторяет РЕКОМЕНДОВАННУЮ"
+			echo "стратегию (строка из блока РЕКОМЕНДАЦИЯ выше). Если она прошла в скане, но умерла"
+			echo "при мгновенном повторе - ТСПУ адаптивный: после разогрева сканом он режет повторные"
+			echo "соединения независимо от механики, и в проде видео будет умирать через 5-15 с."
+			echo "=== ПРОВЕРКА АДАПТИВНОСТИ ТСПУ (re-test рекомендованных строк: $CHAMP) ===" >> $RFULL
+			for CN in $CHAMP; do
+				RA=$(sed -n "${CN}p" "$NORM")
+				echo "Строка $CN (чемпион): $RA"
+				echo "Строка $CN: $RA" >> $RFULL
+				if rt_champ_ok "$CN" "$RA" "$MDLF"; then
+					echo "   Результат мгновенного повтора: ПРОШЛА (проверены версии TLS: $RT_NEED; TLS1.2=$RT_A12 TLS1.3=$RT_A13)"
+					echo "   Результат: ПРОШЛА мгновенный повтор ($RT_NEED)" >> $RFULL
+				else
+					echo "   Результат мгновенного повтора: НЕ ПРОШЛА (нужны версии TLS: $RT_NEED; TLS1.2=$RT_A12 TLS1.3=$RT_A13)"
+					echo "   Результат: НЕ ПРОШЛА повтор ($RT_NEED)" >> $RFULL
+				fi
+			done
+			# Контроль данных (HS-критерий): сколько байт качнули GET-пробы чемпиона
+			DSTAT=$(awk -F '\t' -v u="$CURDOM" '$6 ~ u && $4+0 > 0 { n++; if (mn == "" || $4+0 < mn) mn = $4+0; if ($4+0 > mx) mx = $4+0 } END { printf "%d %d %d", n+0, mn+0, mx+0 }' "$MF" 2>/dev/null)
+			DN=$(echo $DSTAT | cut -d ' ' -f 1); DMIN=$(echo $DSTAT | cut -d ' ' -f 2); DMAX=$(echo $DSTAT | cut -d ' ' -f 3)
+			echo "Контроль данных (GET через чемпионскую стратегию): попыток ${DN:-0}, байт за попытку: ${DMIN:-0}-${DMAX:-0}."
+			echo "Контроль данных: попыток ${DN:-0}, байт за попытку ${DMIN:-0}-${DMAX:-0}." >> $RFULL
+			if [ "${DMAX:-0}" -ge 65536 ]; then
+				echo "   Данные идут: HS-порог 64 КБ пройден."
+				echo "   Данные идут: HS-порог 64 КБ пройден." >> $RFULL
+			elif [ "${DMAX:-0}" -ge 32768 ]; then
+				echo "   Данные идут, но ниже HS-порога 64 КБ - при мёртвых данных в проде это признак insufficient_data."
+				echo "   Данные идут, но ниже HS-порога 64 КБ." >> $RFULL
+			elif [ "${DN:-0}" -ge 1 ]; then
+				echo "   ВНИМАНИЕ: максимум ${DMAX:-0} байт за попытку - данные после рукопожатия почти не идут (HS-критерий insufficient_data)."
+				echo "   ВНИМАНИЕ: максимум ${DMAX:-0} байт за попытку - данные после рукопожатия почти не идут." >> $RFULL
+			else
+				echo "   Контроль данных: GET-проб не зафиксировано."
+				echo "   Контроль данных: GET-проб нет." >> $RFULL
+			fi
+			if [ -n "$RT_DIED" ] && [ "${DMAX:-0}" -ge 65536 ]; then
+				echo "ВЕРДИКТ: повтор провалился на части TLS-проб, НО контроль данных скачал ${DMAX:-0} байт за попытку - соединение ЖИВО и данные идут."
+				echo "Это НЕ признак адаптивного ТСПУ: провал одной версии TLS при единичном повторе - чаще флап, а не деградация."
+				echo "Проверьте прод-пробой (вкладка слева) и воспроизведением видео. Если прод-проба покажет отказы через несколько минут после скана - тогда ТСПУ адаптивный."
+				{
+					echo "ВЕРДИКТ: повтор провалился на части TLS-проб, но данные идут (${DMAX:-0} б/попытку) - адаптив НЕ подтверждён."
+					echo "Чаще флап одной версии TLS при единичном повторе. Проверьте прод-пробой."
+				} >> $RFULL
+			elif [ -n "$RT_DIED" ]; then
+				echo "ВЕРДИКТ: ТСПУ АДАПТИВНЫЙ - рекомендованная стратегия прошла в скане и умерла при повторе (данные не идут)."
+				echo "В проде ожидайте деградацию: длинные потоки (видео) режутся через 5-15 с даже при зелёном скане."
+				echo "Меры: дробилка (вариант 5) - двухсторонний десинк не даёт ТСПУ чистого паттерна;"
+				echo "лестница с ротацией (вариант 4) - сама восстанавливается после задушенных соединений;"
+				echo "при жёсткой адаптивности на видеодоменах - туннель (WARP/awg) по ipset googlevideo."
+				{
+					echo "ВЕРДИКТ: ТСПУ АДАПТИВНЫЙ - рекомендованная стратегия умерла при мгновенном повторе (данных нет);"
+					echo "в проде ждите деградацию потоков. Меры: дробилка (5), лестница (4), при жёсткой адаптивности - туннель."
+				} >> $RFULL
+			elif [ -n "$RT_OK" ]; then
+				echo "ВЕРДИКТ: адаптив не пойман - рекомендованная стратегия пережила мгновенный повтор."
+				echo "Это НЕ гарантия для длинных потоков (видео): итог проверяйте воспроизведением."
+				{
+					echo "ВЕРДИКТ: адаптив не пойман (рекомендованная строка пережила повтор). Длинные потоки проверяйте видео."
+				} >> $RFULL
+			elif [ -n "$RT_BROKEN" ]; then
+				if grep -q "could not find working DoH server" "$MDLF" 2>/dev/null; then
+					echo "ВЕРДИКТ: re-test не выполнился - blockcheck2 прервался на DoH-проверке. Вердикт об адаптивности неопределён."
+					echo "ВЕРДИКТ: re-test не выполнился (DoH)." >> $RFULL
+				else
+					echo "ВЕРДИКТ: re-test не выполнился - скан прервался до проверки стратегий. Вердикт об адаптивности неопределён."
+					echo "ВЕРДИКТ: re-test не выполнился (скан прервался)." >> $RFULL
+				fi
+			else
+				echo "Re-test не дал результата (стратегия не найдена в логе повтора) - пришлите краткий лог."
+				echo "Re-test не дал результата." >> $RFULL
+			fi
+		fi
+		# RLF-файлы fam-отчётов больше не нужны (чемпионы собраны)
+		rm -f /tmp/class_report.d$DOMNUM.ipv* /tmp/class_minilist.d$DOMNUM /tmp/class_normlist.d$DOMNUM /tmp/tspu_curl_probe /tmp/tspu_curl_metrics.d$DOMNUM 2>/dev/null
+	done
+
+	# По завершении теста убрать служебные строки запуска из вывода.
+	# ВАЖНО: перезаписываем СОДЕРЖИМОЕ файла (cat tmp > RUNLOG), а не sed -i:
+	# sed -i подменяет файл новым inode, и весь дальнейший вывод раннера
+	# (ОТЧЁТ с «Рабочими стратегиями») уходит в отцеплённый файл, пропадая
+	# из видимого лога. После перезаписи fd переоткрывается в append —
+	# чтобы следующие echo не создавали дыры в файле.
+	sed '/В данный момент производится тестирование сети/d; /Останавливаю Zapret2 на время теста/d' "$RUNLOG" > "$RUNLOG.tmp" 2>/dev/null
+	cat "$RUNLOG.tmp" > "$RUNLOG" 2>/dev/null
+	rm -f "$RUNLOG.tmp" 2>/dev/null
+	exec 1>>"$RUNLOG" 2>&1
+
+	# Краткий лог: весь лог без мусора от curl
+	awk '
+	  /^More details here:/ { next }
+	  /^curl failed to verify/ { next }
+	  /^establish a secure connection/ { next }
+	  /^how to fix it/ { next }
+	  /^$/ { next }
+	  /curl: \([0-9]+\)/ && length($0) > 90 {
+	    if (match($0, /curl: \([0-9]+\)/)) { print substr($0, 1, RSTART + RLENGTH - 1) " <полный текст ошибки - в class_test.log>"; next }
+	  }
+	  { print }
+	' $L > $L.short
+
+	# Краткий лог самодостаточен (фидбек участника: «в лог не копируется отчёт»):
+	# в начале ИТОГ+ОТЧЁТ, затем сырой лог blockcheck2
+	{ echo "=== ИТОГ И ОТЧЁТ TSPU TEST ==="; cat "$RFULL"; echo; echo "=== СЫРОЙ ЛОГ BLOCKCHECK2 ==="; cat "$L.short"; } > "$L.short.new" 2>/dev/null
+	mv "$L.short.new" "$L.short" 2>/dev/null
+
+	MODEL=$(cat /tmp/sysinfo/model 2>/dev/null)
+	FW=$(. /etc/openwrt_release 2>/dev/null && echo "$DISTRIB_DESCRIPTION ($DISTRIB_ARCH)")
+	echo
+	echo "=== ОТЧЁТ ДЛЯ issue #1 (скопируйте всё между этими строками) ==="
+	echo "Скрипт: ${SCRIPT_VER}"
+	echo "Роутер: ${MODEL:-неизвестно}"
+	echo "Прошивка: ${FW:-неизвестно}"
+	echo "Домены: $DOM"
+	echo "curl: ${CURLV:-неизвестно}"
+	echo "nfqws2: ${NV:-неизвестно}"
+	# Проверка circular в lua-файлах zapret2 (полевой кейс: nfqws2 v1.0.7 без circular
+	# печатает «desync function 'circular' does not exist» и соединения идут БЕЗ обхода)
+	LUFN=$(find /opt/zapret2 -maxdepth 4 -name '*.lua' 2>/dev/null)
+	CIRHIT=$(echo "$LUFN" | xargs grep -l "circular" 2>/dev/null | head -n 1)
+	CLNHIT=$(echo "$LUFN" | xargs grep -l "tls_client_hello_clone" 2>/dev/null | head -n 1)
+	if [ -n "$CIRHIT" ]; then
+		echo "Lua-функции zapret2: circular: найдена"
+	else
+		echo "Lua-функции zapret2: circular: НЕ НАЙДЕНА (варианты генератора 4-8 с circular не заработают — nfqws2 печатает «desync function 'circular' does not exist» и идёт без обхода; обновите zapret2)"
+	fi
+	if [ -n "$CLNHIT" ]; then
+		echo "Lua-функции zapret2: tls_client_hello_clone: найдена"
+	else
+		echo "Lua-функции zapret2: tls_client_hello_clone: НЕ НАЙДЕНА (строки корпуса 32-33 — клон-фейк — несовместимы с этим nfqws2; обновите zapret2)"
+	fi
+	case "$CURLV" in
+	  *mbedTLS*|*LibreSSL*)
+	    echo "TLS-бэкенд curl без kyber: ClientHello уходит одним пакетом. У браузеров (Chrome/Firefox) hello"
+	    echo "двухпакетный (kyber) и другой отпечаток - результаты нарезки переносятся не 1:1. Финальная проверка - в браузере (Инкогнито / Ctrl+F5)."
+	    ;;
+	esac
+	echo "Per-device: стратегии валидированы curl-пробами (десктопный профиль). Телефоны (Cronet/QUIC) и ТВ (свой TLS-стек) могут вести себя иначе - проверяйте на устройстве; телефон грузит видео по минуте -> закройте QUIC (fw4: UDP 443 -> Reject, затем restart zapret2)."
+	cat $RFULL
+	echo "=== конец отчёта ==="
+	echo
+	echo "Краткий лог: /tmp/class_test.log.short"
+	echo "Полный лог: $L"
+
+	rm -f "$PIDF"
+	echo "state=done exitcode=0" > "$STATUS"
+}
+
+# --- 34 стратегии (v2.6): нарезка / голый фейк / комбинации / двухпакетный hello / комбо дробилки / шумовая серия / клон-фейк / send-эхо ---
+# ============================================================
+#  Прод-проба: стресс повторных соединений при ЖИВОМ Zapret2.
+#  Адаптивный ТСПУ режет повторные соединения после разогрева -
+#  проба меряет скорость появления отказов по 10-секундным окнам.
+# ============================================================
+# Убийца раннеров по /proc-скану: работает независимо от того, какой версией
+# приложения процесс был запущен (PID-файлы переживают переустановки).
+# ВАЖНО: паттерн = ОТДЕЛЬНЫЙ аргумент (_canary), без пробелов - /proc/PID/cmdline
+# хранит аргументы NUL-разделёнными строками, "tspu-test _canary" с пробелом
+# физически не матчится (фидбек 2.5: канарейка пережила stop из-за этого).
+# ВАЖНО-2: только kill -9! TERM проглатывался trap-ом раннеров (handler без exit
+# возвращал управление в while true - процесс продолжал цикл; вся история
+# "Остановить не помогает" была про это)
+hs_kill_runners() {
+	for p in /proc/[0-9]*/cmdline; do
+		grep -qa "$1" "$p" 2>/dev/null || continue
+		pid=${p#/proc/}; pid=${pid%/cmdline}
+		[ "$pid" = "$$" ] && continue
+		kill -9 "$pid" 2>/dev/null
+	done
+}
+
+PROD_PIDF=/tmp/tspu_prod.pid
+PROD_STATUS=/tmp/tspu_prod.status
+PROD_LOG=/tmp/tspu_prod.log
+PROD_RUNLOG=/tmp/tspu_prod_run.log
+
+prod_alive() { [ -f "$PROD_PIDF" ] && kill -0 "$(cat "$PROD_PIDF" 2>/dev/null)" 2>/dev/null; }
+
+prod_stop() {
+	touch /tmp/tspu_prod.stop 2>/dev/null
+	pkill -f '[t]spu-test _prod' 2>/dev/null
+	hs_kill_runners "_prod"
+	if prod_alive; then kill -9 "$(cat "$PROD_PIDF")" 2>/dev/null; rm -f "$PROD_PIDF"; fi
+	echo "Прод-проба остановлена."
+}
+
+prod_status() {
+	if prod_alive; then
+		cat "$PROD_STATUS" 2>/dev/null
+	else
+		cat "$PROD_STATUS" 2>/dev/null || echo "state=idle"
+	fi
+	echo "alive=$(prod_alive && echo 1 || echo 0)"
+}
+
+_prod() {
+	DOM=$1; DUR=$2
+	echo $$ > "$PROD_PIDF"
+	trap 'rm -f "$PROD_PIDF"' EXIT
+	trap 'rm -f "$PROD_PIDF"; exit 0' INT TERM
+	: > "$PROD_LOG"
+	if pgrep nfqws2 >/dev/null 2>&1; then MODE="Zapret2 работает - проба меряет вашу текущую стратегию"; else MODE="Zapret2 не запущен - проба меряет ТСПУ без обхода"; fi
+	T0=$(date +%s); TE=$((T0 + DUR)); N_OK=0; N_FAIL=0; TFAIL=""
+	echo "Прод-проба: ${DUR}с, домен $DOM, $MODE" | tee -a "$PROD_LOG"
+	while [ "$(date +%s)" -lt "$TE" ]; do
+		[ -f /tmp/tspu_prod.stop ] && { rm -f "$PROD_PIDF"; echo "state=stopped" > "$PROD_STATUS"; exit 0; }
+		R=$(curl -s -o /dev/null --max-time 5 -w "%{http_code}|%{time_total}" "https://$DOM/generate_204" 2>/dev/null)
+		CODE=${R%%|*}; TT=${R##*|}
+		TS=$(date +%s)
+		if [ -n "$CODE" ] && [ "$CODE" != "000" ]; then
+			N_OK=$((N_OK+1))
+			echo "[$(date '+%H:%M:%S')] OK код=$CODE время=${TT:-?}с #${TS}" >> "$PROD_LOG"
+		else
+			N_FAIL=$((N_FAIL+1))
+			[ -z "$TFAIL" ] && TFAIL=$((TS - T0))
+			echo "[$(date '+%H:%M:%S')] СБОЙ #${TS}" >> "$PROD_LOG"
+		fi
+		echo "state=running elapsed=$((TS - T0))/$DUR ok=$N_OK fail=$N_FAIL" > "$PROD_STATUS"
+		sleep 1
+	done
+	echo "=== РЕЗУЛЬТАТ ПРОД-ПРОБЫ ===" | tee -a "$PROD_LOG"
+	echo "Всего соединений: $((N_OK + N_FAIL)) | успешных: $N_OK | отказов: $N_FAIL" | tee -a "$PROD_LOG"
+	WT0=$T0
+	while [ $WT0 -lt $TE ]; do
+		WE=$((WT0 + 10)); [ $WE -gt $TE ] && WE=$TE
+		WOK=$(awk -v a=$((WT0 + 1)) -v b=$WE '$2=="OK" && match($0, /#[0-9]+$/) { e=substr($0, RSTART+1, RLENGTH-1); if (e>=a && e<=b) c++ } END { print c+0 }' "$PROD_LOG")
+		WFL=$(awk -v a=$((WT0 + 1)) -v b=$WE '$2=="СБОЙ" && match($0, /#[0-9]+$/) { e=substr($0, RSTART+1, RLENGTH-1); if (e>=a && e<=b) c++ } END { print c+0 }' "$PROD_LOG")
+		echo "  окно $((WT0 - T0 + 1))-$((WE - T0))с: OK=$WOK FAIL=$WFL" | tee -a "$PROD_LOG"
+		WT0=$WE
+	done
+	if [ "$N_FAIL" -eq 0 ]; then
+		echo "ВЕРДИКТ: все соединения прошли - признаков деградации не замечено. Это проверка соединений, а не самого видео: откройте видео и посмотрите, как играет." | tee -a "$PROD_LOG"
+	elif [ -n "$TFAIL" ] && [ "$TFAIL" -ge 10 ]; then
+		echo "ВЕРДИКТ: ТСПУ адаптивный - первые соединения проходили, а с ${TFAIL}-й секунды он начал резать новые." | tee -a "$PROD_LOG"
+		echo "ТСПУ разогревается и режет повторные соединения. Меры: дробилка (5), лестница (4), туннель на видеодомены." | tee -a "$PROD_LOG"
+	else
+		echo "ВЕРДИКТ: соединения начали отказывать сразу (с ${TFAIL:-1}-й секунды) - узел жёсткий или стратегия не подходит." | tee -a "$PROD_LOG"
+	fi
+	echo "state=done ok=$N_OK fail=$N_FAIL first_fail=${TFAIL:-0}" > "$PROD_STATUS"
+	rm -f "$PROD_PIDF"
+}
+
+do_prod_start() {
+	DOM=${1:-www.youtube.com}
+	DUR=${2:-30}
+	echo "$DOM" | grep -qE '^[A-Za-z0-9.-]+$' || { echo "state=error msg=invalid domain"; exit 1; }
+	case "$DOM" in -*) echo "state=error msg=invalid domain"; exit 1 ;; esac
+	case "$DUR" in *[!0-9]*) DUR=30 ;; esac
+	[ "$DUR" -lt 10 ] && DUR=10
+	[ "$DUR" -gt 300 ] && DUR=300
+	# Рестарт-семантика: гасим старые прод-пробы и запускаем с текущими параметрами
+	rm -f /tmp/tspu_prod.stop
+	pkill -f '[t]spu-test _prod' 2>/dev/null
+	hs_kill_runners "_prod"
+	command -v curl >/dev/null 2>&1 || { echo "state=error msg=curl not found"; exit 1; }
+	echo "state=starting" > "$PROD_STATUS"
+	/bin/sh -c "/usr/bin/tspu-test _prod \"$DOM\" \"$DUR\" > $PROD_RUNLOG 2>&1 &"
+	sleep 1
+	if prod_alive; then echo "state=started"; else echo "state=error msg=failed to start"; head -n 3 "$PROD_RUNLOG" 2>/dev/null; exit 1; fi
+}
+
+# ============================================================
+#  Валидатор: прогон ЧУЖИХ стратегий на вашем ТСПУ.
+#  Строки (аргументы nfqws2) из /tmp/tspu_validate_norm.txt
+#  тестируются blockcheck2 на указанном домене (Zapret2
+#  останавливается на время скана, потом запускается обратно).
+# ============================================================
+VAL_PIDF=/tmp/tspu_val.pid
+VAL_STATUS=/tmp/tspu_val.status
+VAL_LOG=/tmp/tspu_val.log
+VAL_RUNLOG=/tmp/tspu_val_run.log
+
+val_alive() { [ -f "$VAL_PIDF" ] && kill -0 "$(cat "$VAL_PIDF" 2>/dev/null)" 2>/dev/null; }
+
+val_stop() {
+	pkill -f '[t]spu-test _validate' 2>/dev/null
+	hs_kill_runners "_validate"
+	if val_alive; then kill -9 "$(cat "$VAL_PIDF")" 2>/dev/null; rm -f "$VAL_PIDF"; fi
+	# Дочерний blockcheck2 переживал kill -9 раннера и продолжал работать со своим
+	# nfqws2 параллельно с запущенным Zapret2. Тест и валидатор взаимоисключающие,
+	# поэтому blockcheck2 здесь может принадлежать только валидатору.
+	pid_alive || kill $(pgrep -f '[b]lockcheck2.sh') 2>/dev/null
+	sleep 1
+	/etc/init.d/zapret2 start >/dev/null 2>&1
+	echo "Валидация остановлена."
+}
+
+VAL_REPORT=/tmp/tspu_val.report
+
+_val_report() {
+	# Ревью 2.5 п.1.1/1.10: (1) счётчик сбрасывается на ЛЮБОЙ строке «- ...» и на
+	# «clearing» (раньше только на «- curl_test»: AVAILABLE из «- IP block tests»
+	# следующего блока засчитывался стратегии -> любая строка получала
+	# «ПРОШЛА только на TLS 1.3»); (2) считаются ПОПЫТКИ (N из M) по каждой версии.
+	: > "$VAL_REPORT"
+	echo "=== РЕЗУЛЬТАТ ВАЛИДАЦИИ (домен: $1, повторов: $2) ===" | tee -a "$VAL_LOG" >> "$VAL_REPORT"
+	NOK=0; NPART=0; NALL=0; NMISS=0
+	while IFS= read -r A; do
+		[ -z "$A" ] && continue
+		NALL=$((NALL+1))
+		# Ошибка nfqws2 в блоке стратегии (например, "desync function 'circular' does not
+		# exist" - функции нет в lua-наборе zapret2) = попытки шли БЕЗ обхода
+		VERR=$(awk -v pat="nfqws2 $A" '
+			index($0, pat) > 0 { f = 1; next }
+			/^- / || /^clearing/ { f = 0 }
+			f && /^desync function/ { print $0; exit }
+		' "$VAL_LOG" 2>/dev/null | head -n 1)
+		AVRES=$(awk -v pat="nfqws2 $A" -v rep="$2" '
+			index($0, pat) > 0 { f = 1; v = ($0 ~ /curl_test_https_tls13/) ? "13" : "12"; seen[v] = 1; next }
+			/^- / || /^clearing/ { f = 0 }
+			!f { next }
+			/^\[attempt [0-9]+\]/ { t[v]++; if ($0 ~ /curl: \(/) e[v]++; next }
+			/^!!!!! AVAILABLE !!!!!/ { a[v]++; if (rep == 1) { t[v]++ } next }
+			rep == 1 && /^UNAVAILABLE/ { t[v]++; e[v]++; next }
+			END { printf "%d %d %d %d %d %d %d %d", t["12"]+0, e["12"]+0, t["13"]+0, e["13"]+0, seen["12"]+0, seen["13"]+0, a["12"]+0, a["13"]+0 }
+		' "$VAL_LOG" 2>/dev/null)
+		set -- $AVRES
+		T12=${1:-0}; E12=${2:-0}; T13=${3:-0}; E13=${4:-0}; S12=${5:-0}; S13=${6:-0}; A12=${7:-0}; A13=${8:-0}
+		# Успехи: попытка без curl-ошибки = прошла; финальный AVAILABLE подтверждает
+		# полный успех. Если attempt-строк не распознано (t=0), а строка в логе -
+		# одна виртуальная попытка (фолбэк на финальные маркеры)
+		[ "${A12:-0}" -ge 1 ] && E12=0
+		[ "${A13:-0}" -ge 1 ] && E13=0
+		if [ "$S12" = 1 ] && [ "$T12" = 0 ]; then T12=1; [ "${A12:-0}" -ge 1 ] || E12=1; fi
+		if [ "$S13" = 1 ] && [ "$T13" = 0 ]; then T13=1; [ "${A13:-0}" -ge 1 ] || E13=1; fi
+		O12=$((T12 - E12)); O13=$((T13 - E13))
+		if [ -n "$VERR" ]; then
+			V="НЕ ПРОВЕРЕНА: nfqws2 не знает функцию из стратегии (${VERR#desync function }). Обновите zapret2 - в lua-скриптах вашей версии нет этой функции (nfqws2 запускался без обхода)."; NMISS=$((NMISS+1))
+			echo "Стратегия: $V" | tee -a "$VAL_LOG" >> "$VAL_REPORT"
+			continue
+		fi
+		if [ "$S12" = 0 ] && [ "$S13" = 0 ]; then
+			V="НЕ ПРОВЕРЕНА: строки нет в логе blockcheck2 (скан прервался или строка не разобралась)"; NMISS=$((NMISS+1))
+		else
+			L12="TLS 1.2: $O12 из $T12"; L13="TLS 1.3: $O13 из $T13"
+			if [ "$T12" -gt 0 ] && [ "$O12" = "$T12" ] && [ "$T13" -gt 0 ] && [ "$O13" = "$T13" ]; then
+				V="ПРОШЛА (обе версии TLS) - $L12, $L13"; NOK=$((NOK+1))
+			elif [ "$T13" -gt 0 ] && [ "$O13" = "$T13" ]; then
+				V="ПРОШЛА только на TLS 1.3 - $L12, $L13"; NOK=$((NOK+1))
+			elif [ "$T12" -gt 0 ] && [ "$O12" = "$T12" ]; then
+				V="ПРОШЛА только на TLS 1.2 - $L12, $L13"; NOK=$((NOK+1))
+			elif [ "$O12" -gt 0 ] || [ "$O13" -gt 0 ]; then
+				V="НЕСТАБИЛЬНО (часть попыток прошла) - $L12, $L13"; NPART=$((NPART+1))
+			else
+				V="НЕ прошла - $L12, $L13"
+			fi
+		fi
+		echo "Стратегия: $V" | tee -a "$VAL_LOG" >> "$VAL_REPORT"
+		case "$V" in
+			НЕСТАБИЛЬНО*|"НЕ прошла"*)
+				echo "   Подсказка: если эта стратегия работает у вас в проде - ТСПУ мог быть разогрет предыдущим сканом (после полного теста он временно режет соединения; через пару минут отпускает). Подождите 2-3 минуты и повторите валидацию, либо проверьте прод-пробой."
+				echo "   Если стратегия содержит circular/strategy=N - в blockcheck2 каждая попытка начинается с нового соединения: фактически проверяется первая ступень. Ступени проверяйте отдельными строками."
+				;;
+		esac
+	done < /tmp/tspu_validate_norm.txt
+	if grep -q "working without bypass" "$VAL_LOG" 2>/dev/null; then
+		echo "ВНИМАНИЕ: домен открывается и БЕЗ обхода - вердикт о стратегии ничего не доказывает." | tee -a "$VAL_LOG" >> "$VAL_REPORT"
+	fi
+	if [ "$NMISS" -gt 0 ] && [ "$NOK" = 0 ] && [ "$NPART" = 0 ]; then
+		echo "ИТОГ: проверка не выполнилась - смотрите технический лог (DoH, сеть, синтаксис строки)." | tee -a "$VAL_LOG" >> "$VAL_REPORT"
+	elif [ "$NOK" -gt 0 ]; then
+		echo "ИТОГ: стратегия работает на вашем ТСПУ (все попытки хотя бы на одной версии TLS)." | tee -a "$VAL_LOG" >> "$VAL_REPORT"
+	elif [ "$NPART" -gt 0 ]; then
+		echo "ИТОГ: стратегия работает нестабильно - проходит часть попыток. Для узлов googlevideo это типично; годится как ступень circular, но не как единственная строка." | tee -a "$VAL_LOG" >> "$VAL_REPORT"
+	else
+		echo "ИТОГ: стратегия НЕ работает на вашем ТСПУ - ни одна попытка не прошла." | tee -a "$VAL_LOG" >> "$VAL_REPORT"
+	fi
+}
+
+_validate() {
+	# ВАЖНО: порядок аргументов - ДОМЕН, ПОВТОРОВ (раньше был перепутан: доменом
+	# становилось число повторов и blockcheck тестировал несуществующий узел "2")
+	DOM=$1; REP=$2
+	echo $$ > "$VAL_PIDF"
+	WAS=0
+	pgrep nfqws2 >/dev/null 2>&1 && { WAS=1; /etc/init.d/zapret2 stop >/dev/null 2>&1; }
+	trap 'rm -f "$VAL_PIDF"; [ "$WAS" = 1 ] && /etc/init.d/zapret2 start >/dev/null 2>&1' EXIT
+	trap 'rm -f "$VAL_PIDF"; [ "$WAS" = 1 ] && /etc/init.d/zapret2 start >/dev/null 2>&1; exit 0' INT TERM
+	S=/tmp/tspu_validate_norm.txt
+	L=/tmp/tspu_val.log
+	: > "$L"
+	echo "state=running" > "$VAL_STATUS"
+	cd /opt/zapret2 || { echo "state=error msg=Zapret2 not found" > "$VAL_STATUS"; exit 1; }
+	BATCH=1 SCANLEVEL=force TEST=custom LIST_HTTPS_TLS12=$S LIST_HTTPS_TLS13=$S DOMAINS="$DOM" IPVS=4 ENABLE_HTTP=0 ENABLE_HTTPS_TLS12=1 ENABLE_HTTPS_TLS13=1 ENABLE_HTTP3=0 REPEATS=$REP CURL_HTTPS_GET=1 CURL_MAX_TIME=2.5 ./blockcheck2.sh > "$L" 2>&1
+	# Запускать Zapret2 только если он работал до валидации (трап это уже учитывает)
+	[ "$WAS" = 1 ] && /etc/init.d/zapret2 start >/dev/null 2>&1
+	_val_report "$DOM" "$REP"
+	echo "state=done" > "$VAL_STATUS"
+	rm -f "$VAL_PIDF"
+}
+
+do_validate_start() {
+	DOM=${1:-www.youtube.com}
+	REP=${2:-2}
+	echo "$DOM" | grep -qE '^[A-Za-z0-9.-]+$' || { echo "state=error msg=invalid domain"; exit 1; }
+	case "$DOM" in -*) echo "state=error msg=invalid domain"; exit 1 ;; esac
+	case "$REP" in *[!0-9]*) REP=2 ;; esac
+	[ "$REP" -lt 1 ] && REP=1
+	[ "$REP" -gt 5 ] && REP=5
+	if val_alive; then echo "Валидация уже идёт."; exit 0; fi
+	[ -s /tmp/tspu_validate.txt ] || { echo "state=error msg=вставьте стратегию в поле"; exit 1; }
+	[ -f /opt/zapret2/blockcheck2.sh ] || { echo "state=error msg=Zapret2 not found"; exit 1; }
+	# Запрещены только shell-критичные символы (обратная кавычка, $, ;, &, |, <, >) -
+	# они не встречаются в аргументах nfqws2. Всё остальное (#, скобки, кавычки, *)
+	# легитимно: luaexec:code=..., seqovl=#patmod, host=www.google.com и т.п.
+	if grep -qE '[`$;&|<>]' /tmp/tspu_validate.txt; then
+		echo "state=error msg=стратегия содержит недопустимые символы: обратная кавычка, доллар, точка с запятой, амперсанд, пайп, перенаправление"
+		exit 1
+	fi
+	# Стратегия вставляется ЦЕЛИКОМ (многострочно, как в поле script Zapret2):
+	# все непустые строки склеиваются пробелами в ОДНУ стратегию. CRLF из
+	# браузерного textarea ломает сравнение строк - убираем.
+	tr -d '\r' < /tmp/tspu_validate.txt | grep -vE '^[[:space:]]*(#|$)' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//' | tr '\n' ' ' | tr -s ' ' | sed 's/ $//' > /tmp/tspu_validate_norm.txt
+	echo >> /tmp/tspu_validate_norm.txt
+	grep -q . /tmp/tspu_validate_norm.txt || { echo "state=error msg=no strategy rows"; exit 1; }
+	# Новый запуск = старый отчёт сразу стирается
+	: > "$VAL_LOG"; : > "$VAL_REPORT"
+	echo "state=starting" > "$VAL_STATUS"
+	/bin/sh -c "/usr/bin/tspu-test _validate \"$DOM\" \"$REP\" > $VAL_RUNLOG 2>&1 &"
+	sleep 1
+	if val_alive; then echo "Валидация запущена - результат появится через минуту-две."; else echo "state=error msg=failed to start"; head -n 3 "$VAL_RUNLOG" 2>/dev/null; exit 1; fi
+}
+
+# ============================================================
+#  Канарейка: фоновый контроль живости ТЕКУЩЕЙ стратегии.
+#  Каждый интервал - один запрос через запущенный Zapret2;
+#  история в /tmp/tspu_canary.log (чистится перезагрузкой).
+# ============================================================
+CAN_PIDF=/tmp/tspu_can.pid
+CAN_STATUS=/tmp/tspu_can.status
+CAN_LOG=/tmp/tspu_canary.log
+
+can_alive() { [ -f "$CAN_PIDF" ] && kill -0 "$(cat "$CAN_PIDF" 2>/dev/null)" 2>/dev/null; }
+
+_canary() {
+	DOM=$1; IV=$2
+	echo $$ > "$CAN_PIDF"
+	trap 'rm -f "$CAN_PIDF"' EXIT
+	trap 'rm -f "$CAN_PIDF"; exit 0' INT TERM
+	if [ -f "$CAN_LOG" ] && [ "$(wc -c < "$CAN_LOG" 2>/dev/null)" -gt 204800 ]; then
+		tail -c 30720 "$CAN_LOG" > "$CAN_LOG.tmp" 2>/dev/null
+		echo "$(date '+%Y-%m-%d %H:%M:%S') — (старые записи обрезаны, лог превысил 200 КБ)" >> "$CAN_LOG.tmp"
+		mv "$CAN_LOG.tmp" "$CAN_LOG"
+	fi
+	echo "$(date '+%Y-%m-%d %H:%M:%S') — канарейка запущена: домен $DOM, проверка каждые ${IV} с" >> "$CAN_LOG"
+	while true; do
+		# Во время теста/валидации nfqws2 запущен blockcheck2 с тестовой
+		# стратегией - замер в это время ничего не говорит о вашей стратегии
+		if pid_alive || val_alive; then
+			echo "$(date '+%Y-%m-%d %H:%M:%S') — пропуск: идёт тест/валидация" >> "$CAN_LOG"
+		elif pgrep nfqws2 >/dev/null 2>&1; then
+			R=$(curl -s -o /dev/null --max-time 6 -w "%{http_code}|%{time_total}" "https://$DOM/generate_204" 2>/dev/null)
+			CODE=${R%%|*}; TT=${R##*|}
+			if [ -n "$CODE" ] && [ "$CODE" != "000" ]; then
+				echo "$(date '+%Y-%m-%d %H:%M:%S') — ОК ($(printf '%.2f' "${TT:-0}" 2>/dev/null || echo "${TT:-0}") с)" >> "$CAN_LOG"
+				LASTRES="ОК"
+			else
+				echo "$(date '+%Y-%m-%d %H:%M:%S') — СБОЙ (сайт не открылся)" >> "$CAN_LOG"
+				LASTRES="СБОЙ"
+			fi
+		else
+			echo "$(date '+%Y-%m-%d %H:%M:%S') — пропуск: Zapret2 не запущен" >> "$CAN_LOG"
+			LASTRES="пропуск"
+		fi
+		# Перезапись, а не дозапись - файл статуса рос в RAM бесконечно
+		printf 'last_result=%s\nlast=%s dom=%s\n' "${LASTRES:-пропуск}" "$(date '+%Y-%m-%d %H:%M:%S')" "$DOM" > "$CAN_STATUS"
+		slept=0
+		while [ $slept -lt $IV ]; do
+			[ -f /tmp/tspu_can.stop ] && { rm -f "$CAN_PIDF"; exit 0; }
+			sleep 1
+			slept=$((slept+1))
+		done
+	done
+}
+
+do_canary_start() {
+	DOM=${1:-www.youtube.com}
+	IV=${2:-300}
+	echo "$DOM" | grep -qE '^[A-Za-z0-9.-]+$' || { echo "state=error msg=invalid domain"; exit 1; }
+	case "$DOM" in -*) echo "state=error msg=invalid domain"; exit 1 ;; esac
+	case "$IV" in *[!0-9]*) IV=300 ;; esac
+	[ "$IV" -lt 60 ] && IV=60
+	[ "$IV" -gt 3600 ] && IV=3600
+	# Рестарт-семантика: гасим ЛЮБЫЕ старые канарейки (в т.ч. от прошлых версий)
+	# и запускаем с текущими параметрами; стоп-флаг снимается
+	rm -f /tmp/tspu_can.stop
+	pkill -f '[t]spu-test _canary' 2>/dev/null
+	hs_kill_runners "_canary"
+	command -v curl >/dev/null 2>&1 || { echo "state=error msg=curl not found"; exit 1; }
+	echo "state=starting" > "$CAN_STATUS"
+	/bin/sh -c "/usr/bin/tspu-test _canary \"$DOM\" \"$IV\" > /tmp/tspu_can_run.log 2>&1 &"
+	sleep 1
+	if can_alive; then echo "Канарейка запущена - следит за доменом."; else echo "state=error msg=failed to start"; head -n 3 /tmp/tspu_can_run.log 2>/dev/null; exit 1; fi
+}
+
+canary_stop() {
+	touch /tmp/tspu_can.stop 2>/dev/null
+	pkill -f '[t]spu-test _canary' 2>/dev/null
+	hs_kill_runners "_canary"
+	if can_alive; then kill -9 "$(cat "$CAN_PIDF")" 2>/dev/null; rm -f "$CAN_PIDF"; fi
+	echo "$(date '+%Y-%m-%d %H:%M:%S') — канарейка остановлена" >> "$CAN_LOG"
+	echo "Канарейка остановлена."
+}
+
+canary_status() {
+	if can_alive; then
+		echo "Канарейка работает."
+	else
+		echo "Канарейка остановлена."
+	fi
+	if [ -s "$CAN_LOG" ]; then
+		OKS=$(grep -c "— ОК (" "$CAN_LOG" 2>/dev/null)
+		FAILS=$(grep -c "— СБОЙ" "$CAN_LOG" 2>/dev/null)
+		echo "Проверок: успешных ${OKS:-0}, сбоев ${FAILS:-0}."
+		LAST=$(grep -E "— (ОК|СБОЙ|пропуск)" "$CAN_LOG" 2>/dev/null | tail -n 1)
+		[ -n "$LAST" ] && echo "Последняя запись: $LAST"
+		echo "--- последние 15 записей ---"
+		tail -n 15 "$CAN_LOG" 2>/dev/null
+	else
+		echo "Проверок ещё не было."
+	fi
+}
+
+make_list() {
+	cat > $LIST <<'EOF'
+# --- 1-6: чистая нарезка, БЕЗ фейков (техника в чистом виде) ---
+--payload=tls_client_hello --lua-desync=multidisorder:pos=midsld
+--payload=tls_client_hello --lua-desync=multisplit:pos=midsld
+--payload=tls_client_hello --lua-desync=multidisorder:pos=sld
+--payload=tls_client_hello --lua-desync=multidisorder:pos=1,midsld
+--payload=tls_client_hello --lua-desync=multisplit:pos=1,midsld:seqovl=5:seqovl_pattern=0x1603030000
+--payload=tls_client_hello --lua-desync=multidisorder:pos=midsld:seqovl=midsld-1:seqovl_pattern=0x1603030000
+# --- 7-10: голый фейк, разная «дурка» (изолирует фулинг от техники) ---
+--payload=tls_client_hello --lua-desync=fake:blob=fake_default_tls:tcp_md5:repeats=6
+--payload=tls_client_hello --lua-desync=fake:blob=fake_default_tls:ip_autottl=-2,3-20:repeats=6
+--payload=tls_client_hello --lua-desync=fake:blob=fake_default_tls:badsum:repeats=6
+--payload=tls_client_hello --lua-desync=fake:blob=fake_default_tls:tcp_md5:tls_mod=rnd,rndsni,dupsid:repeats=6
+# --- 11-16: фейк вместе с нарезкой (комбинации) ---
+--payload=tls_client_hello --lua-desync=fake:blob=fake_default_tls:tcp_md5:repeats=6 --lua-desync=multisplit:pos=midsld
+--payload=tls_client_hello --lua-desync=fake:blob=fake_default_tls:tcp_md5:repeats=6 --lua-desync=multidisorder:pos=midsld
+--payload=tls_client_hello --lua-desync=fakeddisorder:pos=midsld:tcp_md5
+--payload=tls_client_hello --lua-desync=fakedsplit:pos=midsld:tcp_md5
+--payload=tls_client_hello --lua-desync=hostfakesplit:tcp_md5
+--payload=tls_client_hello --lua-desync=fake:blob=fake_default_tls:badsum:repeats=6 --lua-desync=multidisorder:pos=midsld
+# --- 17: имитация двухпакетного hello (kyber у браузеров) - разрез на 1-м байте ---
+--payload=tls_client_hello --lua-desync=multisplit:pos=1
+# --- 18-19: 7-точечный шред по всем границам SNI (мульти-разрез) ---
+--payload=tls_client_hello --lua-desync=multisplit:pos=1,sniext+1,host+1,midsld-2,midsld,midsld+2,endhost-1
+--payload=tls_client_hello --lua-desync=multidisorder:pos=1,sniext+1,host+1,midsld-2,midsld,midsld+2,endhost-1
+# --- 20-21: badsum-фейк внутри нарезки + 7-шред (пара, механика дробилки) ---
+--payload=tls_client_hello --lua-desync=multisplit:blob=fake_default_tls:badsum:pos=2:nodrop:repeats=4 --lua-desync=multisplit:pos=1,sniext+1,host+1,midsld-2,midsld,midsld+2,endhost-1
+--payload=tls_client_hello --lua-desync=multidisorder:blob=fake_default_tls:badsum:pos=2:nodrop:repeats=4 --lua-desync=multidisorder:pos=1,sniext+1,host+1,midsld-2,midsld,midsld+2,endhost-1
+# --- 22: простой разрез с seqovl=1 (без паттерна) ---
+--payload=tls_client_hello --lua-desync=multisplit:pos=1,midsld:seqovl=1
+# --- 23: двухсторонний шред (payload=all - режется и ответ сервера, ServerHello) ---
+--payload=all --lua-desync=multisplit:pos=1,sniext+1,host+1,midsld-2,midsld,midsld+2,endhost-1
+# --- 24-27: шумовая серия дробилки - дозы и позиции badsum-пары ---
+--payload=tls_client_hello --lua-desync=multisplit:blob=fake_default_tls:badsum:pos=2:nodrop:repeats=2 --lua-desync=multisplit:pos=1,sniext+1,host+1,midsld-2,midsld,midsld+2,endhost-1
+--payload=tls_client_hello --lua-desync=multisplit:blob=fake_default_tls:badsum:pos=3:nodrop:repeats=6 --lua-desync=multisplit:pos=1,sniext+1,host+1,midsld-2,midsld,midsld+2,endhost-1
+--payload=tls_client_hello --lua-desync=multidisorder:blob=fake_default_tls:badsum:pos=2:nodrop:repeats=2 --lua-desync=multidisorder:pos=1,sniext+1,host+1,midsld-2,midsld,midsld+2,endhost-1
+--payload=tls_client_hello --lua-desync=multidisorder:blob=fake_default_tls:badsum:pos=3:nodrop:repeats=6 --lua-desync=multidisorder:pos=1,sniext+1,host+1,midsld-2,midsld,midsld+2,endhost-1
+# --- 28-29: двухсторонняя дробилка целиком (payload=all + пара + шред) ---
+--payload=all --lua-desync=multisplit:blob=fake_default_tls:badsum:pos=2:nodrop:repeats=4 --lua-desync=multisplit:pos=1,sniext+1,host+1,midsld-2,midsld,midsld+2,endhost-1
+--payload=all --lua-desync=multidisorder:blob=fake_default_tls:badsum:pos=2:nodrop:repeats=4 --lua-desync=multidisorder:pos=1,sniext+1,host+1,midsld-2,midsld,midsld+2,endhost-1
+# --- 30-31: шум-проба тяжёлой дозы без шреда (изолирует вклад примесей) ---
+--payload=tls_client_hello --lua-desync=multisplit:blob=fake_default_tls:badsum:pos=2:nodrop:repeats=6
+--payload=tls_client_hello --lua-desync=multidisorder:blob=fake_default_tls:badsum:pos=2:nodrop:repeats=6
+# --- 32-33: клон-фейк (HS-идея): фейк с КЛОНИРОВАННЫМ ClientHello клиента ---
+--payload=tls_client_hello --lua-desync=tls_client_hello_clone:blob=hs32 --lua-desync=fake:blob=hs32:tcp_md5:repeats=6
+--payload=tls_client_hello --lua-desync=tls_client_hello_clone:blob=hs33 --lua-desync=fake:blob=hs33:tcp_md5:repeats=6 --lua-desync=multidisorder:pos=midsld
+# --- 34: send-эхо (HS-приём): неизменённые копии hello - серверу данные, DPI шум ---
+--payload=tls_client_hello --lua-desync=send:repeats=2 --lua-desync=multidisorder:pos=midsld
+EOF
+}
+
+case "${1:-}" in
+	start)
+		shift
+		make_list
+		do_start "$@"
+		;;
+	listhostlists)
+		ls -1 /opt/zapret2/ipset/zapret_hosts_*.txt 2>/dev/null | sed 's%.*/%%'
+		;;
+	removetspu)
+		[ -f /etc/config/zapret2 ] || { echo "state=error msg=/etc/config/zapret2 not found"; exit 1; }
+		TS=$(date +%Y%m%d%H%M%S)
+		BK="/tmp/zapret2.backup.$TS"
+		cp /etc/config/zapret2 "$BK" 2>/dev/null || { echo "state=error msg=backup failed"; exit 1; }
+		awk '/^config strategy .tspu_test.$/{skip=1; next} /^config /{skip=0} !skip' /etc/config/zapret2 > /etc/config/zapret2.new
+		mv /etc/config/zapret2.new /etc/config/zapret2
+		uci -q show zapret2 >/dev/null 2>&1 || { cp "$BK" /etc/config/zapret2; echo "state=error msg=uci validation failed - restored"; exit 1; }
+		/etc/init.d/zapret2 restart 2>/dev/null
+		echo "state=ok removed=tspu_test backup=$BK"
+		;;
+	applyzapret)
+		# Применение готовой стратегии в /etc/config/zapret2 (запрос владельца проекта).
+		# Сценарий приходит в /tmp/tspu_apply.script (пишет контроллер LuCI).
+		# $2 = метка, $3 = тестируемый домен (для авто-подбора списка хостов)
+		DOM="${3:-}"
+		[ -f /tmp/tspu_apply.script ] || { echo "state=error msg=no /tmp/tspu_apply.script"; exit 1; }
+		[ -f /etc/config/zapret2 ] || { echo "state=error msg=/etc/config/zapret2 not found (Zapret2 установлен?)"; exit 1; }
+		if [ ! -s /tmp/tspu_apply.script ] || ! grep -q -- '--lua-desync' /tmp/tspu_apply.script; then
+			# ПУТЬ УДАЛЕНИЯ: пустой сценарий/маркер = убрать секцию целиком
+			awk '/^config strategy .tspu_test.$/{skip=1; next} /^config /{skip=0} !skip' /etc/config/zapret2 > /etc/config/zapret2.new
+			mv /etc/config/zapret2.new /etc/config/zapret2
+			uci -q show zapret2 >/dev/null 2>&1 || { cp "$BK" /etc/config/zapret2; echo "state=error msg=uci validation failed - restored"; exit 1; }
+			/etc/init.d/zapret2 restart 2>/dev/null
+			echo "$(date '+%Y-%m-%d %H:%M:%S') remove label=${2:-tspu-test}" >> /tmp/tspu_profiles.log 2>/dev/null
+			echo "state=ok removed=tspu_test backup=$BK"
+			exit 0
+		fi
+		grep -q -- '--lua-desync' /tmp/tspu_apply.script || { echo "state=error msg=no lua-desync in script"; exit 1; }
+		# Список хостов: выбор из UI (файл /tmp/tspu_apply.hostlist, имя zapret_hosts_*.txt)
+		HL=""
+		[ -f /tmp/tspu_apply.hostlist ] && HL=$(head -n1 /tmp/tspu_apply.hostlist 2>/dev/null)
+		HL=$(echo "$HL" | tr -dc "A-Za-z0-9_.-")
+		if [ -z "$HL" ] && [ -n "$DOM" ]; then
+			KW=$(echo "$DOM" | sed 's/^www\.//' | awk -F. '{print $(NF-1)}' | tr -dc 'A-Za-z0-9-')
+			[ -n "$KW" ] && HL=$(ls -1 /opt/zapret2/ipset/zapret_hosts_*.txt 2>/dev/null | sed 's%.*/%%' | grep -im1 "$KW" || true)
+			HL=${HL#zapret_hosts_}
+			HL=${HL%.txt}
+		fi
+		if [ -z "$HL" ] && echo "$DOM" | grep -qi 'youtube'; then
+			HL='youtube'
+		fi
+		# Формат RR: list hostlist '<имя списка>' - ссылка на config list '<имя>' (определяется во вкладке Списки Zapret2)
+		HL=${HL#zapret_hosts_}
+		HL=${HL%.txt}
+		if [ -n "$HL" ]; then
+			HL_LINE="	list hostlist '$HL'"
+		else
+			HL_LINE=""
+		fi
+		# Прозрачность: чем реально станет ссылка (RR ищет config list '<имя>' с option path во вкладке Списки)
+		HLSTATE=""; LP=""; HLN=""
+		if [ -n "$HL" ]; then
+			LP=$(uci -q get "zapret2.$HL.path" 2>/dev/null)
+			if [ -n "$LP" ] && [ -f "$LP" ]; then
+				HLN=$(wc -l < "$LP" 2>/dev/null | tr -dc '0-9')
+				HLSTATE="resolved"
+			elif [ -n "$LP" ]; then
+				HLSTATE="file_missing"
+			else
+				HLSTATE="unresolved"
+			fi
+		fi
+		# Валидация: только строки-аргументы nfqws2 (без кавычек, $, ;, |, &, <, >, скобок)
+		if grep -qvE '^[ 	]*$|^--[A-Za-z0-9_%=:,/+.@-]+([ 	]+[A-Za-z0-9_%=:,/+.@-]+)*[ 	]*$' /tmp/tspu_apply.script; then
+			echo "state=error msg=script contains forbidden characters"
+			exit 1
+		fi
+		TS=$(date +%Y%m%d%H%M%S)
+		BK="/tmp/zapret2.backup.$TS"
+		cp /etc/config/zapret2 "$BK" 2>/dev/null || { echo "state=error msg=backup failed"; exit 1; }
+		# Убрать существующую секцию tspu_test (если есть)
+		awk '/^config strategy .tspu_test.$/{skip=1; next} /^config /{skip=0} !skip' "$BK" > /etc/config/zapret2.new
+		# Собрать новую секцию (многострочный option script)
+		SEC=/tmp/tspu_apply.section
+		{
+			echo ""
+			echo "config strategy 'tspu_test'"
+			echo "	option enabled '1'"
+			echo "	option port '443'"
+			echo "	list protocol 'tcp'"
+			# Фильтр L3: ipv4 | ipv6 | both (файл пишет контроллер LuCI, по умолчанию ipv4)
+			L3="ipv4"
+			[ -f /tmp/tspu_apply.l3 ] && L3=$(head -n1 /tmp/tspu_apply.l3 2>/dev/null | tr -dc 'a-z')
+			case "$L3" in
+				ipv6) echo "	list filter_l3 'ipv6'" ;;
+				both) echo "	list filter_l3 'ipv4'"
+					echo "	list filter_l3 'ipv6'" ;;
+				*) echo "	list filter_l3 'ipv4'" ;;
+			esac
+			echo "	list filter_l7 'tls'"
+			[ -n "$HL_LINE" ] && echo "$HL_LINE"
+			printf "	option script '"
+			awk 'NR>1{printf "\n"} {printf "%s", $0}' /tmp/tspu_apply.script
+			echo "'"
+		} > "$SEC"
+		# Вставить ПЕРЕД первой существующей config strategy (first-match-wins),
+		# иначе - в конец файла
+		if grep -q '^config strategy ' /etc/config/zapret2.new; then
+			awk -v sec="$(cat "$SEC")" 'BEGIN{done=0} !done && /^config strategy /{ print sec; print ""; done=1 } {print}' /etc/config/zapret2.new > /etc/config/zapret2.final
+		else
+			echo "" >> /etc/config/zapret2.new
+			cat "$SEC" >> /etc/config/zapret2.new
+			cp /etc/config/zapret2.new /etc/config/zapret2.final
+		fi
+		mv /etc/config/zapret2.final /etc/config/zapret2
+		# Активировать .default-файл списка, если файла нет (как RR GUI при заполнении списка)
+		if [ -n "$HL" ] && [ ! -f "/opt/zapret2/ipset/zapret_hosts_$HL.txt" ] && [ -f "/opt/zapret2/ipset/zapret_hosts_$HL.txt.default" ]; then
+			cp "/opt/zapret2/ipset/zapret_hosts_$HL.txt.default" "/opt/zapret2/ipset/zapret_hosts_$HL.txt"
+		fi
+		# ЖЁСТКАЯ проверка: script не пуст (иначе секция-пустышка перехватит весь трафик)
+		uci -q get zapret2.tspu_test.script 2>/dev/null | grep -q -- '--lua-desync' || { cp "$BK" /etc/config/zapret2; /etc/init.d/zapret2 restart 2>/dev/null; echo "state=error msg=verify failed (empty script) - restored from backup"; exit 1; }
+		# Валидация uci: при ошибке синтаксиса - откат к бэкапу
+		if ! uci -q show zapret2 >/dev/null 2>&1; then
+			cp "$BK" /etc/config/zapret2
+			echo "state=error msg=uci validation failed - config restored from backup"
+			exit 1
+		fi
+		ls -1t /tmp/zapret2.backup.* 2>/dev/null | tail -n +4 | xargs -r rm -f 2>/dev/null
+		# История профилей: что и когда применялось (вкладка Канарейка)
+		echo "$(date '+%Y-%m-%d %H:%M:%S') apply label=${2:-tspu-test} hl=${HL:-none} script=$(head -n 1 /tmp/tspu_apply.script 2>/dev/null | cut -c1-64)" >> /tmp/tspu_profiles.log 2>/dev/null
+		/etc/init.d/zapret2 restart >/dev/null 2>&1
+		pgrep nfqws2 >/dev/null 2>&1 || { echo "state=error msg=nfqws2 not running after restart"; exit 1; }
+		case "$HLSTATE" in
+			resolved) echo "state=ok backup=$BK section=tspu_test zapret2=restarted hostlist=$HL resolved=$LP hosts=${HLN:-?}" ;;
+			file_missing) echo "state=ok backup=$BK section=tspu_test zapret2=restarted hostlist=$HL resolved=$LP file_missing=1" ;;
+			unresolved) echo "state=ok backup=$BK section=tspu_test zapret2=restarted hostlist=$HL unresolved=1" ;;
+			*) echo "state=ok backup=$BK section=tspu_test zapret2=restarted hostlist=none" ;;
+		esac
+		;;
+	stop)
+		do_stop
+		;;
+	status)
+		do_status
+		;;
+	log)
+		cat "$RUNLOG" 2>/dev/null
+		;;
+	clearlog)
+		: > "$RUNLOG" 2>/dev/null
+		echo "cleared"
+		;;
+	_run)
+		shift
+		do_run "$@"
+		;;
+	prod)
+		shift
+		case "$1" in
+			start) shift; do_prod_start "$@" ;;
+			stop) prod_stop ;;
+			status) prod_status ;;
+			clear) : > "$PROD_LOG" 2>/dev/null; echo "state=idle" > "$PROD_STATUS" 2>/dev/null; echo "Лог прод-пробы очищен." ;;
+			log) cat "$PROD_LOG" 2>/dev/null ;;
+			*) echo "usage: tspu-test prod start ДОМЕН [СЕКУНД] | stop | status | log"; exit 1 ;;
+		esac
+		;;
+	_prod)
+		shift
+		_prod "$@"
+		;;
+	validate)
+		shift
+		case "$1" in
+			start) shift; do_validate_start "$@" ;;
+			stop) val_stop ;;
+			status) if val_alive; then cat "$VAL_STATUS" 2>/dev/null; echo "alive=1"; else echo "alive=0"; fi ;;
+			clear) : > "$VAL_LOG" 2>/dev/null; : > "$VAL_REPORT" 2>/dev/null; echo "Отчёт валидации очищен." ;;
+			report) if [ -s "$VAL_REPORT" ]; then
+				cat "$VAL_REPORT"
+			elif val_alive; then
+				echo "Проверка идёт - результат появится по завершении."
+			else
+				echo "Отчёта ещё нет - запустите валидацию."
+			fi ;;
+			log) cat "$VAL_LOG" 2>/dev/null ;;
+			*) echo "usage: tspu-test validate start ДОМЕН [ПОВТОРОВ] | stop | status | log"; exit 1 ;;
+		esac
+		;;
+	_validate)
+		shift
+		_validate "$@"
+		;;
+	canary)
+		shift
+		case "$1" in
+			start) shift; do_canary_start "$@" ;;
+			stop) canary_stop ;;
+			status) canary_status ;;
+			clear) : > "$CAN_LOG" 2>/dev/null; echo "$(date '+%Y-%m-%d %H:%M:%S') — лог очищен" >> "$CAN_LOG"; echo "Лог канарейки очищен." ;;
+			log) cat "$CAN_LOG" 2>/dev/null ;;
+			*) echo "usage: tspu-test canary start ДОМЕН [ИНТЕРВАЛ_С] | stop | status | log"; exit 1 ;;
+		esac
+		;;
+	_canary)
+		shift
+		_canary "$@"
+		;;
+	ech)
+		D=${2:-www.youtube.com}
+		echo "$D" | grep -qE '^[A-Za-z0-9.-]+$' || { echo "state=error msg=invalid domain"; exit 1; }
+		R=$(curl -s --max-time 8 "https://dns.google/resolve?name=$D&type=HTTPS" 2>/dev/null)
+		[ -n "$R" ] || R=$(curl -s --max-time 8 -H "accept: application/dns-json" "https://cloudflare-dns.com/dns-query?name=$D&type=HTTPS" 2>/dev/null)
+		if [ -n "$R" ] && echo "$R" | grep -q '"type": *65'; then
+			EB=$(echo "$R" | grep -o "ech=[A-Za-z0-9+/=_-]*" | head -n 1)
+			if [ -n "$EB" ]; then
+				echo "Результат: сайт поддерживает шифрование имени (ECH)."
+				echo "Это значит: имя сайта, которое вы открываете, скрыто от промежуточных фильтров."
+				echo "Действий не требуется - современные браузеры используют это автоматически."
+			else
+				echo "Результат: сайт использует современный формат DNS-записей, но шифрование имени (ECH) не включает."
+			fi
+		else
+			echo "Результат: сайт не анонсирует шифрование имени (ECH)."
+		fi
+		echo "Что это вообще такое: ECH - способ спрятать имя сайта внутри зашифрованного соединения,"
+		echo "чтобы фильтр не видел, какой именно сайт вы открываете. Проверка отвечает только на вопрос"
+		echo "«обещает ли сайт такую защиту» - сам роутер её включить или выключить не может."
+		;;
+	profiles)
+		if [ -s /tmp/tspu_profiles.log ]; then
+			cat /tmp/tspu_profiles.log
+		else
+			echo "история профилей пуста - ни одна стратегия ещё не применялась"
+		fi
+		;;
+	*)
+		echo "TSPU test - определение класса ТСПУ провайдера (ядро tspu-class-test v2.9)"
+		echo "Использование: tspu-test start ... | stop | status | log | clearlog | prod start|stop|status|log | validate start|stop|status|log | canary start|stop|status|log | ech ДОМЕН | profiles"
+		exit 1
+		;;
+esac

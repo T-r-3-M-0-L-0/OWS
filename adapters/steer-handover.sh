@@ -19,9 +19,10 @@ steer_handover_state() (
 )
 
 steer_subscription_outputs() {
-    jq -r --arg source "$edit_root/files/etc/zm-steer/sub.txt" '
+    jq -L /usr/lib/ows -r --arg source "$edit_root/files/etc/zm-steer/sub.txt" '
+        include "ows-json";
         (.outputs // {}) | to_entries[] | select(.value.subscription==$source) |
-        .key | select(test("^[A-Za-z0-9_][A-Za-z0-9_-]{0,63}$"))
+        .key | select(identifier(64))
     ' "$edit_root/spec.json"
 }
 
@@ -59,9 +60,10 @@ steer_subscription_status() (
             if [ -n "$url" ]; then printf '%s\n' "$url" | jq -Rc '{url:.}'
             else echo '{"error":"Ссылка подписки не задана"}'; fi
         else
-            printf '%s\n' "$url" | jq -Rc --arg rev "$edit_revision" --argjson live "$live" '
+            printf '%s\n' "$url" | jq -L /usr/lib/ows -Rc --arg rev "$edit_revision" --argjson live "$live" '
+                include "ows-json";
                 {editable:true,live:$live,configured:(length>0),revision:$rev,can_reset_pins:true,
-                 host:([match("^https://([^/?#]+)").captures[0].string | split("@")[-1]][0] // null)}
+                 host:([url_parts | select(.scheme=="https") | .authority | split("@")[-1]][0])}
             '
         fi
     elif [ "${1:-}" = reveal ]; then
@@ -104,8 +106,9 @@ steer_refresh_draft_subscription() (
     url=$(steer_subscription_source "$previous") || exit 1
     case "$mode" in
         set)
-            url=$(jq -er '.url|strings | select(length<=4096 and test("^https://[^/?#[:space:]]+")
-                and (test("[[:space:][:cntrl:]]")|not))' "$2") ||
+            url=$(jq -L /usr/lib/ows -er 'include "ows-json";
+                .url | strings | select(length<=4096 and any(url_parts; .scheme=="https")
+                    and (explode | all(.[]; (whitespace_code or control_code) | not)))' "$2") ||
                 { echo 'Введите корректную HTTPS-ссылку подписки'; exit 1; }
             ;;
         remove)

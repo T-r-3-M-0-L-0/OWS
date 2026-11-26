@@ -25,8 +25,15 @@ zapret_module_running() {
 zapret_module_repo() {
     case "$1" in
         zapret) echo remittor/zapret-openwrt ;;
-        zapret2) echo Dushnilin/zapret2-openwrt ;;
+        zapret2) echo Routerich ;;
         *) return 1 ;;
+    esac
+}
+
+zapret_module_version() {
+    case "$2" in
+        apk) apk list --installed "$1" 2>/dev/null | awk -v id="$1" 'index($1,id "-")==1 {print substr($1,length(id)+2); exit}' ;;
+        ipk) opkg status "$1" 2>/dev/null | awk '/^Version: / {print $2; exit}' ;;
     esac
 }
 
@@ -49,17 +56,14 @@ zapret_module_native_view() {
 
 zapret_module_info() (
     . /usr/share/libubox/jshn.sh
+    . "${LIB:-/usr/lib/ows}/zapret2-reference.sh"
     id=$1
     zapret_module_valid "$id" || exit 1
     format=$(zapret_module_manager || :)
     arch=$(zapret_module_arch || :)
     prepared=$RUN/packages/$id
     init=/etc/init.d/$id
-    version=''
-    case "$format" in
-        apk) version=$(apk list --installed "$id" 2>/dev/null | awk -v id="$id" 'index($1,id "-")==1 {print substr($1,length(id)+2); exit}') ;;
-        ipk) version=$(opkg status "$id" 2>/dev/null | awk '/^Version: / {print $2; exit}') ;;
-    esac
+    version=$(zapret_module_version "$id" "$format")
     [ "$id" = zapret ] && other=zapret2 || other=zapret
     json_init
     json_add_string id "$id"
@@ -67,6 +71,14 @@ zapret_module_info() (
     json_add_string arch "$arch"
     json_add_string version "$version"
     json_add_string repository "$(zapret_module_repo "$id")"
+    if [ "$id" = zapret2 ]; then
+        json_add_string release_url "$(zapret2_reference_url "$format")"
+        json_add_string reference_version "$OWS_ZAPRET2_VERSION"
+        json_add_string reference_arch "$OWS_ZAPRET2_ARCH"
+        if [ -x "$init" ] && [ "$version" != "$OWS_ZAPRET2_VERSION" ]; then
+            json_add_boolean reference_mismatch 1
+        fi
+    fi
     [ ! -x "$init" ] || json_add_boolean installed 1
     ! zapret_module_running "$id" || json_add_boolean running 1
     [ ! -x "$init" ] || ! "$init" enabled >/dev/null 2>&1 || json_add_boolean enabled 1
@@ -75,7 +87,10 @@ zapret_module_info() (
     fi
     if [ -r "$prepared/version" ] && [ -s "$prepared/luci.$format" ] &&
         { [ -x "$init" ] || [ -s "$prepared/core.$format" ]; }; then
-        json_add_string downloaded "$(cat "$prepared/version")"
+        downloaded=$(cat "$prepared/version")
+        if [ "$id" != zapret2 ] || [ "$downloaded" = "$OWS_ZAPRET2_VERSION" ]; then
+            json_add_string downloaded "$downloaded"
+        fi
     fi
     if native_view=$(zapret_module_native_view "$id"); then
         json_add_string native_view "$native_view"
@@ -86,15 +101,10 @@ zapret_module_info() (
 zapret_module_fetch() {
     case "$1" in
         https://api.github.com/repos/remittor/zapret-openwrt/releases/latest|\
-        https://api.github.com/repos/Dushnilin/zapret2-openwrt/releases/latest|\
-        https://github.com/remittor/zapret-openwrt/releases/download/*|\
-        https://github.com/Dushnilin/zapret2-openwrt/releases/download/*) ;;
+        https://github.com/remittor/zapret-openwrt/releases/download/*) ;;
         *) return 1 ;;
     esac
-    timeout -k 2 1215 curl -fsSL --proto '=https' --proto-redir '=https' --connect-timeout 8 \
-        --max-time 600 --speed-limit 1 --speed-time 45 --retry 1 --retry-max-time 605 \
-        --max-filesize 25165824 -o "$2" "$1" &&
-        [ -s "$2" ] && [ "$(wc -c < "$2")" -le 25165824 ]
+    ows_download_https "$1" "$2"
 }
 
 zapret_module_asset() {
@@ -130,12 +140,10 @@ zapret_module_download() (
     scope=${2:-all}
     format=$(zapret_module_manager) && arch=$(zapret_module_arch) && repo=$(zapret_module_repo "$id") ||
         { echo 'Не удалось определить формат пакета или архитектуру OpenWrt'; exit 1; }
-    for cmd in curl jq timeout sha256sum; do
-        command -v "$cmd" >/dev/null || { echo "Для скачивания нужен $cmd"; exit 1; }
-    done
-    if [ "$id" = zapret ]; then
-        command -v unzip >/dev/null || { echo 'Для распаковки релиза Zapret нужен unzip'; exit 1; }
-    fi
+    . "$LIB/packages.sh"
+    set -- curl jq timeout sha256sum
+    [ "$id" != zapret ] || set -- "$@" unzip
+    ows_ensure_tools "$@" || exit 1
     free=$(df -Pk "$RUN" | awk 'END{print $4}')
     mem=$(awk '$1=="MemAvailable:" {print $2}' /proc/meminfo)
     [ "${free:-0}" -ge 32768 ] && [ "${mem:-0}" -ge 65536 ] ||
@@ -143,13 +151,13 @@ zapret_module_download() (
     mkdir -p "$RUN/packages"
     work=$(mktemp -d "$RUN/packages/.release.XXXXXX") || exit 1
     trap 'rm -rf "$work"' EXIT
-    zapret_module_fetch "https://api.github.com/repos/$repo/releases/latest" "$work/release.json" ||
-        { echo "Не удалось получить описание релиза $repo с GitHub"; exit 1; }
-    tag=$(jq -er '
-        .tag_name | strings | select(length > 0 and length <= 48) |
-        select((explode - ("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-" | explode)) == [])
-    ' "$work/release.json") || { echo 'Некорректный тег релиза Zapret'; exit 1; }
     if [ "$id" = zapret ]; then
+        zapret_module_fetch "https://api.github.com/repos/$repo/releases/latest" "$work/release.json" ||
+            { echo "Не удалось получить описание релиза $repo с GitHub"; exit 1; }
+        tag=$(jq -er '
+            .tag_name | strings | select(length > 0 and length <= 48) |
+            select((explode - ("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-" | explode)) == [])
+        ' "$work/release.json") || { echo 'Некорректный тег релиза Zapret'; exit 1; }
         zapret_module_asset "$work/release.json" "zapret_${tag}_${arch}.zip" "$work/release.zip" || exit 1
         if [ "$scope" = all ]; then
             zapret_module_archive_file "$work/release.zip" "(^|/)zapret[-_][^/]+\\.$format$" "$work/core.$format" ||
@@ -158,10 +166,9 @@ zapret_module_download() (
         zapret_module_archive_file "$work/release.zip" "(^|/)luci-app-zapret[-_][^/]+\\.$format$" "$work/luci.$format" ||
             { echo 'В архиве нет пакета LuCI для выбранной версии OpenWrt'; exit 1; }
     else
-        if [ "$scope" = all ]; then
-            zapret_module_asset "$work/release.json" "zapret2_$arch.$format" "$work/core.$format" || exit 1
-        fi
-        zapret_module_asset "$work/release.json" "luci-app-zapret2.$format" "$work/luci.$format" || exit 1
+        . "$LIB/zapret2-reference.sh"
+        tag=$OWS_ZAPRET2_VERSION
+        zapret2_reference_download "$format" "$arch" "$scope" "$work" || exit 1
     fi
     printf '%s\n' "$tag" > "$work/version"
     rm -f "$work/release.json" "$work/release.zip"
@@ -196,7 +203,15 @@ zapret_module_install() (
     init=/etc/init.d/$id
     format=$(zapret_module_manager) || exit 1
     prepared=$RUN/packages/$id
+    fresh=0
     set -- "$prepared/luci.$format"
+    if [ "$id" = zapret2 ]; then
+        . "$LIB/zapret2-reference.sh"
+        if [ -x "$init" ] && [ "$(zapret_module_version "$id" "$format")" != "$OWS_ZAPRET2_VERSION" ]; then
+            echo 'Установленный движок из другой сборки. Для штатного интерфейса нужен совместимый комплект Routerich.'
+            exit 1
+        fi
+    fi
     if [ -x "$init" ]; then
         if zapret_module_native_view "$id" >/dev/null; then
             echo 'Движок и штатный интерфейс LuCI уже установлены.'
@@ -205,16 +220,25 @@ zapret_module_install() (
     else
         zapret_module_check_other "$id" || exit 1
         set -- "$prepared/core.$format" "$@"
+        if [ "$id" = zapret2 ] && [ ! -e /etc/config/zapret2 ] && [ ! -L /etc/config/zapret2 ]; then fresh=1; fi
+    fi
+    if [ "$id" = zapret2 ]; then
+        [ -r "$prepared/version" ] && [ "$(cat "$prepared/version")" = "$OWS_ZAPRET2_VERSION" ] ||
+            { echo 'Скачайте комплект Routerich для OWS'; exit 1; }
     fi
     for package do
         [ -s "$package" ] || { echo 'Сначала скачайте пакеты'; exit 1; }
     done
     (cd "$prepared" && sha256sum -c SHA256SUMS) || { echo 'Проверка скачанных пакетов не прошла'; exit 1; }
-    case "$format" in
-        apk) apk --no-cache add --allow-untrusted "$@" ;;
-        ipk) opkg update && opkg install "$@" ;;
-    esac || exit 1
+    . "$LIB/packages.sh"
+    ows_install_local_packages "$format" "$@" || exit 1
     [ -x "$init" ] || { echo 'Пакеты установлены, init-служба не найдена'; exit 1; }
+    if [ "$id" = zapret2 ]; then
+        if [ "$fresh" = 1 ]; then
+            zapret2_reference_defaults || { echo 'Не удалось подготовить чистую конфигурацию пресетов'; exit 1; }
+        fi
+        zapret2_reference_luci || { echo 'Не удалось подключить штатный интерфейс Routerich'; exit 1; }
+    fi
     zapret_module_native_view "$id" >/dev/null ||
         { echo "Движок установлен, но пакет luci-app-$id не предоставил ожидаемые страницы LuCI"; exit 1; }
     echo 'Движок и штатный интерфейс LuCI установлены.'
@@ -239,6 +263,13 @@ zapret_module_execute() {
         install) zapret_module_install "$id" ;;
         install-latest)
             if [ -x "$init" ]; then
+                if [ "$id" = zapret2 ]; then
+                    . "$LIB/zapret2-reference.sh"
+                    if [ "$(zapret_module_version "$id" "$(zapret_module_manager || :)")" != "$OWS_ZAPRET2_VERSION" ]; then
+                        echo 'Установлена другая сборка Zapret2. Переход требует переноса существующей конфигурации.'
+                        return 1
+                    fi
+                fi
                 if zapret_module_native_view "$id" >/dev/null; then
                     echo 'Движок и штатный интерфейс LuCI уже установлены.'
                     return 0

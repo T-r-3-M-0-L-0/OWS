@@ -34,7 +34,7 @@ lock_job_resources() {
 }
 
 strategy_running() {
-    pgrep -f '/root/zapret2-tools/([s]trategy-check-control[.]sh[[:space:]]+_(worker|classify_worker)|[p]reset-builder[.]sh[[:space:]]+_test_worker)([[:space:]]|$)|/opt/zapret2/[h]ealthcheck[.]sh([[:space:]]|$)' >/dev/null 2>&1 ||
+    pgrep -f '(/root/zapret2-tools|/usr/lib/ows)/([s]trategy-check-control[.]sh[[:space:]]+_(worker|classify_worker)|[p]reset-builder[.]sh[[:space:]]+_test_worker)([[:space:]]|$)|/opt/zapret2/[h]ealthcheck[.]sh([[:space:]]|$)' >/dev/null 2>&1 ||
         ! ( lock_zapret2 )
 }
 
