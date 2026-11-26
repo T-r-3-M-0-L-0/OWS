@@ -1,4 +1,5 @@
 *.sh text eol=lf
 *.init text eol=lf
 *.rpc text eol=lf
+*.awk text eol=lf
 /bin/ows text eol=lf

@@ -70,10 +70,8 @@ write_config() (
     cp -p "$CONFIG" "$staged" && cat "$1" > "$staged" && mv -f "$staged" "$CONFIG"
 )
 
-restart_and_verify() {
-    local config active delay
-    config=$(uci -q show zapret2) || return 1
-    active=$(printf '%s\n' "$config" | awk -F= '
+zapret2_active_strategies() {
+    awk -F= '
         $2=="strategy" {strategy[$1]=1}
         $1~/\.enabled$/ {sub(/\.enabled$/,"",$1); gsub(/\047/,"",$2); enabled[$1]=$2}
         END {
@@ -81,7 +79,13 @@ restart_and_verify() {
                 for (key in strategy) if (!(key in enabled) || enabled[key]~/^(1|on|yes|true|enabled)$/) n++
             print n+0
         }
-    ')
+    '
+}
+
+restart_and_verify() {
+    local config active delay
+    config=$(uci -q show zapret2) || return 1
+    active=$(printf '%s\n' "$config" | zapret2_active_strategies)
     "$SERVICE" restart 4>&- 5>&- 9>&- >/dev/null 2>&1 || return 1
     for delay in 1 2 3 4 5; do
         sleep 1

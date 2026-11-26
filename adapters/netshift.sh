@@ -1,9 +1,13 @@
 #!/bin/sh
 
+netshift_rules_active() {
+    nft list tables 2>/dev/null | grep -Fxq 'table inet NetShiftTable'
+}
+
 netshift_running() {
     ubus -S call service list '{"name":"sing-box"}' 2>/dev/null |
         jsonfilter -e '@["sing-box"].instances.*.running' | grep -Fxq true &&
-        nft list tables 2>/dev/null | grep -Fxq 'table inet NetShiftTable'
+        netshift_rules_active
 }
 
 netshift_info() (

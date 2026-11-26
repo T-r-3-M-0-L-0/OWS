@@ -35,6 +35,42 @@
     flex-basis: 100%;
 }
 
+.ows .ows-service-summary {
+    flex-basis: 100%;
+    min-width: 0;
+    border-top: 1px solid var(--border-color-medium, rgba(128, 128, 128, .32));
+}
+
+.ows .ows-services-state {
+    margin: 0;
+    padding: 0;
+    list-style: none;
+}
+
+.ows .ows-service-state {
+    padding: .4rem 0;
+    overflow-wrap: anywhere;
+}
+
+.ows .ows-service-state + .ows-service-state {
+    border-top: 1px solid var(--border-color-medium, rgba(128, 128, 128, .32));
+}
+
+.ows .ows-service-state-heading {
+    display: flex;
+    flex-wrap: wrap;
+    gap: .2rem 1rem;
+}
+
+.ows .ows-service-state-heading [data-state="ok"],
+.ows .ows-service-state-heading [data-state="main_ok"] {
+    font-weight: 600;
+}
+
+.ows .ows-service-errors {
+    margin: .2rem 0 0 1.2rem;
+}
+
 .ows .ows-job-output {
     max-height: 20rem;
     overflow: auto;

@@ -13,6 +13,7 @@
 'require view.ows-doh as doh';
 'require view.ows-domain-search as domainSearch';
 'require view.ows-legacy-cleanup as legacyCleanup';
+'require view.ows-service-status as serviceStatus';
 'require view.ows-instructions as instructions';
 
 var status = rpc.declare({ object: 'ows', method: 'status' });
@@ -329,6 +330,9 @@ return view.extend({
         var nextRefresh = 0;
         var jobObservers = Object.create(null);
         var moduleTemplates = Object.create(null);
+        var services = serviceStatus.panel(function(error) {
+            return statusLabel(error, moduleTemplates[error.kind]);
+        }, jobOutput);
         function loadOutput() {
             var id = outputJob;
             if (!details.open || !id) return;
@@ -355,6 +359,7 @@ return view.extend({
                 if (!observer || activePhase(result.phase)) return;
                 delete jobObservers[result.job];
                 observer(result);
+                services.load();
             }
             var other = Object.keys(jobObservers).filter(function(key) { return key !== id; });
             nextRefresh = now + (other.length || jobObservers[id] ? 3000 : 15000);
@@ -612,7 +617,9 @@ return view.extend({
         renderModules([], {}, {});
         registry.load();
         refresh();
+        services.load();
         poll.add(function() { return refresh(false); }, 3);
+        poll.add(services.load, 60);
         return E('div', { class: 'ows' }, [
             E('link', { rel: 'stylesheet', href: L.resource('view/ows-services.css') }),
             E('h2', {}, _('OWS')),
@@ -621,7 +628,8 @@ return view.extend({
                 E('strong', {}, _('Последняя операция')),
                 phase,
                 job,
-                details
+                details,
+                services.content
             ]),
             workspace
         ]);

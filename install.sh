@@ -74,6 +74,8 @@ FILES
 adapters/zapret2-editor.sh /usr/lib/ows/zapret2-editor.sh 644
 adapters/registry.sh /usr/lib/ows/registry.sh 644
 adapters/domain-search.sh /usr/lib/ows/domain-search.sh 644
+adapters/service-status.sh /usr/lib/ows/service-status.sh 644
+adapters/service-errors.awk /usr/lib/ows/service-errors.awk 644
 examples/steer.adapter.json /usr/lib/ows/steer.adapter.json 644
 examples/stgws.adapter.json /usr/lib/ows/stgws.adapter.json 644
 examples/netshift.adapter.json /usr/lib/ows/netshift.adapter.json 644
@@ -107,6 +109,7 @@ Docs/instructions/openwrt.md /usr/lib/ows/instructions-openwrt.md 644
 Docs/instructions/tspu-classification.md /usr/lib/ows/instructions-tspu-classification.md 644
 luci/ows-doh.js /www/luci-static/resources/view/ows-doh.js 644
 luci/ows-domain-search.js /www/luci-static/resources/view/ows-domain-search.js 644
+luci/ows-service-status.js /www/luci-static/resources/view/ows-service-status.js 644
 luci/ows-legacy-cleanup.js /www/luci-static/resources/view/ows-legacy-cleanup.js 644
 luci/ows-native.js /www/luci-static/resources/view/ows-native.js 644
 luci/ows-native-zapret2.js /www/luci-static/resources/view/ows-native-zapret2.js 644
