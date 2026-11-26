@@ -74,6 +74,38 @@ zapret2_reference_resources() {
     done
 }
 
+zapret2_reference_merge_main() {
+    local type main
+    type=$(staged get zapret2.main || :)
+    case "$type" in
+        zapret2) return 0 ;;
+        config|global|settings)
+            staged set zapret2.main=zapret2 || return 1
+            ;;
+        '')
+            main=$(awk -F= '$2=="zapret2" && $1 ~ /^zapret2[.]([A-Za-z0-9_]+|@zapret2\[[0-9]+\])$/ { print $1 }' "$candidate/sections")
+            case "$main" in
+                '')
+                    printf '\n' >> "$candidate/uci/zapret2" &&
+                        cat "$LIB/zapret2-default-main.uci" >> "$candidate/uci/zapret2"
+                    return
+                    ;;
+                *'
+'*)
+                    echo 'Найдено несколько общих секций Zapret2. Укажите основную секцию main и повторите импорт.'
+                    return 1
+                    ;;
+                *) staged rename "$main=main" || return 1 ;;
+            esac
+            ;;
+        *)
+            printf 'Имя main занято секцией Zapret2 типа %s. Импорт не меняет такую секцию.\n' "$type"
+            return 1
+            ;;
+    esac
+    staged commit zapret2
+}
+
 zapret2_reference_defaults() (
     local mode=${1:-fresh} file target candidate
     . "$LIB/zapret2.sh"
@@ -91,10 +123,12 @@ zapret2_reference_defaults() (
         merge)
             mkdir "$candidate/uci" "$candidate/override" "$candidate/delta" || exit 1
             cp "$candidate/previous" "$candidate/uci/zapret2" || exit 1
-            uci -q -c "$candidate/uci" -C "$candidate/override" -t "$candidate/delta" show zapret2 > "$candidate/sections" || exit 1
-            grep -Fxq 'zapret2.main=zapret2' "$candidate/sections" ||
-                { echo 'Конфигурация не поддерживает формат Routerich'; exit 1; }
-            cp -p "$candidate/previous" "$candidate/candidate" || exit 1
+            staged() { uci -q -c "$candidate/uci" -C "$candidate/override" -t "$candidate/delta" "$@"; }
+            staged show zapret2 > "$candidate/sections" ||
+                { echo 'Не удалось прочитать UCI-конфигурацию Zapret2'; exit 1; }
+            zapret2_reference_merge_main &&
+                staged show zapret2 > "$candidate/sections" &&
+                cp -p "$candidate/uci/zapret2" "$candidate/candidate" || exit 1
             awk -F= '
                 FNR==NR {
                     if ($1 ~ /^zapret2[.][A-Za-z0-9_]+$/) { sub(/^zapret2[.]/,"",$1); existing[$1]=$2 }
@@ -125,7 +159,7 @@ zapret2_reference_defaults() (
         [ ! -L "$target" ] || exit 1
         [ -f "$target" ] || (umask 022; set -C; : > "$target") || exit 1
     done
-    validate_config "$candidate" || exit 1
+    zapret2_validate_candidate "$candidate" || exit 1
     cmp -s "$CONFIG" "$candidate/previous" && zapret2_no_pending_changes ||
         { echo 'Конфигурация Zapret2 изменилась во время импорта'; exit 1; }
     if ! cmp -s "$CONFIG" "$candidate/candidate"; then

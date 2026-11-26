@@ -22,9 +22,14 @@ zapret2_no_pending_changes() {
     done
 }
 
-validate_config() (
-    [ -x "$SERVICE" ] && [ -s "$CONFIG" ] && [ -s "$1/candidate" ] || exit 1
-    zapret2_no_pending_changes || { echo 'Сохраните или сбросьте черновик Zapret2 в LuCI или UCI.' >&2; exit 1; }
+validate_config() {
+    [ -s "$CONFIG" ] || return 1
+    zapret2_no_pending_changes || { echo 'Сохраните или сбросьте черновик Zapret2 в LuCI или UCI.' >&2; return 1; }
+    zapret2_validate_candidate "$1"
+}
+
+zapret2_validate_candidate() (
+    [ -x "$SERVICE" ] && [ -s "$1/candidate" ] || exit 1
     stage=$(mktemp -d "$1/validate.XXXXXX") || exit 1
     trap 'rm -rf "$stage"' EXIT
     mkdir "$stage/delta" "$stage/override"

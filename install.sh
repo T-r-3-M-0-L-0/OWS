@@ -40,6 +40,7 @@ adapters/queue-locks.sh /usr/lib/ows/queue-locks.sh 644
 adapters/zapret-module.sh /usr/lib/ows/zapret-module.sh 644
 adapters/zapret2-reference.sh /usr/lib/ows/zapret2-reference.sh 644
 modules/zapret2/zapret2-safe.sh /usr/lib/ows/zapret2-safe.sh 755
+modules/zapret2/defaults/main.uci /usr/lib/ows/zapret2-default-main.uci 644
 modules/zapret2/defaults/profiles.uci /usr/lib/ows/zapret2-default-profiles.uci 644
 modules/zapret2/tools/tspu-test /usr/lib/ows/tspu-test 755
 modules/zapret2/tools/TSPU-CLASS-TEST-LICENSE /usr/lib/ows/TSPU-CLASS-TEST-LICENSE 644
