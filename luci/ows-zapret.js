@@ -2,24 +2,16 @@
 'require baseclass';
 'require rpc';
 'require view.ows-native as nativeView';
+'require view.ows-ui as owsUI';
+
+var field = owsUI.field, button = owsUI.button;
 
 var info = rpc.declare({object:'ows', method:'zapret_module_info', params:['id']});
 var action = rpc.declare({object:'ows', method:'zapret_module_action', params:['id','action']});
 var constructorInfo = rpc.declare({object:'ows', method:'zapret_constructor', params:['topic']});
 var jobOutput = rpc.declare({object:'ows', method:'job_output', params:['job']});
 
-function button(label, run, disabled) {
-    var control = E('button', {type:'button', class:'cbi-button'}, label);
-    control.disabled = !!disabled;
-    control.addEventListener('click', run);
-    return control;
-}
-
 function actions(nodes) { return E('div', {class:'ows-actions'}, nodes); }
-
-function field(label, input) {
-    return E('label', {class:'ows-field'}, [E('span', {}, label), input]);
-}
 
 function rows(headings, items) {
     if (!items.length) return E('p', {}, _('Данных пока нет.'));
@@ -34,7 +26,8 @@ function rows(headings, items) {
 }
 
 return baseclass.extend({
-    init: function(id, followJob) {
+    init: function(id, followJob, profiles) {
+        profiles = profiles || {};
         var panel = E('div');
         var constructor = E('div');
         var message = E('p', {'aria-live':'polite'});
@@ -45,6 +38,8 @@ return baseclass.extend({
             id: id + '-native',
             route: 'ows-native-' + id,
             acl: 'luci-app-' + id,
+            revision: profiles.revision,
+            onLoad: profiles.onNativeLoad,
             available: function() {
                 return info(id).then(function(data) {
                     if (!data || data.error || data.id !== id)
@@ -76,6 +71,8 @@ return baseclass.extend({
                         busy = false;
                         refresh();
                         if (constructorOpened) refreshConstructor();
+                        if (finalState.phase === 'done' && /^builder-(create|apply)$/.test(name) && profiles.onApplied)
+                            profiles.onApplied();
                     });
                 });
             }).catch(function(error) {
@@ -104,9 +101,10 @@ return baseclass.extend({
                     ]),
                     data.conflict ? E('p', {}, _('Другой движок запущен или включён в автозапуск') + ' · ' + data.conflict) : '',
                     actions([
+                        !data.installed ? control(_('Установить'), data.downloaded ? 'install' : 'install-latest',
+                            data.arch && data.format && !data.conflict,
+                            _('Установить движок и штатный интерфейс LuCI?')) : '',
                         control(_('Скачать пакеты'), 'download', data.arch && data.format),
-                        control(_('Установить скачанное'), 'install', data.downloaded && !data.installed && !data.conflict,
-                            _('Установить скачанные пакеты движка и штатного интерфейса?')),
                         data.installed ? control(_('Запустить'), 'start', !data.running && !data.conflict) : '',
                         data.installed ? control(_('Остановить'), 'stop', data.running,
                             _('Остановить рабочую службу?')) : '',
@@ -133,17 +131,13 @@ return baseclass.extend({
 
         function refreshConstructor() {
             constructorOpened = true;
-            return Promise.all([constructorInfo('status'), constructorInfo('targets'), constructorInfo('profiles')]).then(function(result) {
+            return Promise.all([constructorInfo('status'), constructorInfo('targets')]).then(function(result) {
                 var current = result[0];
                 if (!current.available) {
                     constructor.replaceChildren(E('p', {}, current.error || _('Для конструктора нужен комплект strategy-check.')));
                     return;
                 }
-                var classifier = current.classification || {};
                 var builder = current.builder || {};
-                var host = E('input', {type:'text',class:'cbi-input-text',placeholder:'example.org',maxlength:'253'});
-                var repeats = E('input', {type:'number',class:'cbi-input-text',min:1,max:5,value:3});
-                var timeout = E('input', {type:'number',class:'cbi-input-text',min:2,max:30,step:'0.1',value:5});
                 var targets = (result[1].rows || []).map(function(item) {
                     return [item.domain,item.kind,item.state,item.http,item.route];
                 });
@@ -169,19 +163,6 @@ return baseclass.extend({
                 constructor.replaceChildren(
                     actions([button(_('Обновить статус'), refreshConstructor), control(_('Проверить цели'), 'health-run', true)]),
                     rows([_('Домен'), _('Тип'), _('Статус'), _('HTTP'), _('Маршрут')], targets),
-                    E('details', {class:'ows-section'}, [E('summary', {}, _('Сохранённые профили')),
-                        rows([_('Профиль'), _('Включён'), _('Протокол'), _('Порты')], result[2].rows || [])]),
-                    E('h4', {}, _('Классификация ТСПУ')),
-                    E('p', {}, classifier.state || _('Нет отчёта')),
-                    E('div', {class:'ows-fields'}, [field(_('Домен'),host),field(_('Повторы'),repeats),field(_('Тайм-аут, с'),timeout)]),
-                    actions([
-                        button(_('Запустить анализ'), function() {
-                            submit(['classify',host.value.trim(),repeats.value,timeout.value].join(':'),
-                                _('Анализ временно останавливает рабочий Zapret2. Запустить?'));
-                        }, !!classifier.running),
-                        control(_('Остановить анализ'), 'classify-stop', !!classifier.running)
-                    ]),
-                    classifier.log ? E('pre', {class:'ows-job-output'}, classifier.log) : '',
                     E('h4', {}, _('Восстановление профилей')),
                     E('p', {}, builder.state || '—'),
                     actions([

@@ -1,6 +1,7 @@
 #!/bin/sh
 
 REGISTRY=/etc/ows/adapters
+OWS_BUILTIN_ADAPTERS='steer netshift stgws tg-ws-proxy adblock-fast'
 
 registry_error() {
     json_init
@@ -35,15 +36,75 @@ registry_json() {
 
 registry_list() {
     . /usr/lib/ows/vpn.sh
+    local separator entry builtin id kind service source name version description category
+    local installed
+    json_init
+    registry_service_installed zapret zapret
+    registry_service_installed zapret2 zapret2
+    registry_service_installed doh https-dns-proxy
+    installed=$(json_dump)
     separator=
-    printf '{"vpn_drivers":%s,"entries":[' "$(ows_vpn_registry_json)"
+    printf '{"vpn_drivers":%s,"installed":%s,"entries":[' "$(ows_vpn_registry_json)" "$installed"
     for entry in "$REGISTRY"/*.json; do
         [ -f "$entry" ] || break
         printf '%s' "$separator"
+        id=${entry##*/}
+        if builtin=$(registry_builtin_path "${id%.json}") && json_load "$(cat "$entry")"; then
+            json_get_vars kind service source
+            if [ "$kind" = adapter ] && [ "$service" = "$(jsonfilter -i "$builtin" -e '@.service')" ]; then
+                json_get_vars id name version description category
+                if [ -z "$source" ]; then source=$(jsonfilter -i "$builtin" -e '@.source'); fi
+                json_init
+                registry_json
+                registry_service_installed installed "$service"
+                json_dump
+                separator=,
+                continue
+            fi
+        fi
         cat "$entry"
         separator=,
     done
+    for builtin in $OWS_BUILTIN_ADAPTERS; do
+        [ ! -f "$REGISTRY/$builtin.json" ] || continue
+        entry=/usr/lib/ows/$builtin.adapter.json
+        [ -s "$entry" ] && json_load "$(cat "$entry")" || continue
+        json_get_var service service
+        json_add_string kind adapter
+        registry_service_installed installed "$service"
+        printf '%s' "$separator"
+        json_dump
+        separator=,
+    done
     printf ']}\n'
+}
+
+registry_service_installed() {
+    local installed=0
+    [ ! -x "/etc/init.d/$2" ] || installed=1
+    json_add_boolean "$1" "$installed"
+}
+
+registry_builtin_path() {
+    local builtin
+    for builtin in $OWS_BUILTIN_ADAPTERS; do
+        if [ "$builtin" = "$1" ] && [ -s "/usr/lib/ows/$builtin.adapter.json" ]; then
+            printf '%s\n' "/usr/lib/ows/$builtin.adapter.json"
+            return 0
+        fi
+    done
+    return 1
+}
+
+registry_adapter_service() {
+    valid_id "$1" || return 1
+    local entry=$REGISTRY/$1.json
+    if [ -f "$entry" ]; then
+        [ "$(jsonfilter -i "$entry" -e '@.kind')" = adapter ] || return 1
+    else
+        entry=$(registry_builtin_path "$1") || return 1
+    fi
+    [ -f "$entry" ] && jsonfilter -i "$entry" -e '@.service'
 }
 
 registry_manifest() {
@@ -72,7 +133,7 @@ registry_manifest() {
     [ -n "$version" ] && [ "${#version}" -le 32 ] || registry_error 'Укажите версию адаптера'
     [ "${#description}" -le 400 ] || registry_error 'Описание превышает 400 символов'
     [ -z "$source" ] || valid_url "$source" || registry_error 'Источник должен быть ссылкой HTTPS'
-    case "$category" in ''|proxy) ;; *) registry_error 'Допустимая категория адаптера — proxy' ;; esac
+    case "$category" in ''|proxy|vpn|telegram-proxy) ;; *) registry_error 'Выберите категорию vpn или telegram-proxy' ;; esac
     kind=adapter
 }
 
@@ -100,10 +161,7 @@ registry_store() {
 }
 
 registry_status() {
-    valid_id "$id" && [ -f "$REGISTRY/$id.json" ] || registry_error 'Адаптер не найден'
-    [ "$(jsonfilter -i "$REGISTRY/$id.json" -e '@.kind')" = adapter ] ||
-        registry_error 'Запись каталога не является адаптером'
-    service=$(jsonfilter -i "$REGISTRY/$id.json" -e '@.service')
+    service=$(registry_adapter_service "$id") && [ -n "$service" ] || registry_error 'Адаптер не найден'
     reply=$(ubus -S call service list "$(printf '{"name":"%s"}' "$service")") ||
         registry_error 'Не удалось прочитать состояние procd'
     instances=$(printf '%s' "$reply" | jsonfilter -e "@[\"$service\"].instances.*.running")

@@ -4,5 +4,6 @@
   "name": "AdBlock Fast",
   "version": "0.1.0",
   "service": "adblock-fast",
+  "source": "https://docs.mossdef.org/adblock-fast/",
   "description": "Штатное управление списками и блокировкой DNS."
 }

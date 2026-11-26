@@ -4,6 +4,7 @@
   "name": "Telegram-прокси",
   "version": "0.1.0",
   "service": "tg-ws-proxy",
-  "category": "proxy",
+  "category": "telegram-proxy",
+  "source": "https://github.com/spatiumstas/tg-ws-proxy-go/releases",
   "description": "Состояние и управление установленной службой tg-ws-proxy."
 }

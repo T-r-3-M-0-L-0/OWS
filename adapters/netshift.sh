@@ -14,7 +14,12 @@ netshift_info() (
         netshift_running && running=1
     fi
     [ ! -r /usr/share/luci/menu.d/luci-app-netshift.json ] || native=1
-    version=$(opkg status netshift 2>/dev/null | awk '/^Version: / {print $2; exit}')
+    if command -v apk >/dev/null; then
+        version=$(apk list --installed netshift 2>/dev/null |
+            awk -v prefix=netshift- 'index($1,prefix)==1 {print substr($1,length(prefix)+1); exit}')
+    else
+        version=$(opkg status netshift 2>/dev/null | awk '/^Version: / {print $2; exit}')
+    fi
     json_init
     json_add_int schema 1
     json_add_boolean installed "$installed"

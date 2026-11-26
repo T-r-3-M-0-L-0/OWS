@@ -26,6 +26,7 @@ return baseclass.extend({
         var tabsHost = E('div', {}, E('p', {}, _('Загрузка состояния…')));
         var currentLayout = '';
         var prefix = 'vpn-' + entry.id + '-';
+        var sectionTabs, pendingSection;
         var configEditor = editor.init(entry, follow, {outputs:outputs, routes:routes, listActions:listActions});
         var notice = E('p', { 'aria-live': 'polite' });
         var log = E('pre', { hidden: '', class: 'ows-job-output' });
@@ -442,7 +443,9 @@ return baseclass.extend({
             }].concat(configEditor.tabs());
             if (showNative) sections.push(nativeView.tab(Object.assign({}, template.native, { id: prefix + 'native' })));
             if (migrationVisible) sections.push({id: prefix + 'migration', label: _('Перенос'), content: migration});
-            tabsHost.replaceChildren(createTabs(_('Разделы VPN'), sections).content);
+            sectionTabs = createTabs(_('Разделы VPN'), sections, pendingSection);
+            pendingSection = null;
+            tabsHost.replaceChildren(sectionTabs.content);
         }
 
         function load() {
@@ -459,6 +462,11 @@ return baseclass.extend({
         refresh.addEventListener('click', load);
         return {
             id: 'module-' + entry.id, label: entry.name, activate: load,
+            openSection: function(section) {
+                var id = prefix + section;
+                if (sectionTabs) sectionTabs.selectId(id);
+                else pendingSection = id;
+            },
             content: [E('div', { class: 'ows-module-heading' }, [E('h3', {}, entry.name), refresh]),
                 draftActions, tabsHost, notice, log, configEditor.feedback]
         };

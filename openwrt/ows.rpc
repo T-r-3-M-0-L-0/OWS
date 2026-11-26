@@ -25,13 +25,12 @@ ows_vpn() (
     json_load "$(cat)" || exit 1
     json_get_vars id action target change
     . /usr/lib/ows/vpn.sh
+    . /usr/lib/ows/registry.sh
     if ! service=$(ows_vpn_service "$id") || [ -z "$service" ]; then
         echo '{"error":"VPN-драйвер OWS не подключён"}'
         exit
     fi
-    entry=/etc/ows/adapters/$id.json
-    if [ "$(jsonfilter -i "$entry" -e '@.kind' 2>/dev/null)" != adapter ] ||
-        [ "$(jsonfilter -i "$entry" -e '@.service' 2>/dev/null)" != "$service" ]; then
+    if [ "$(registry_adapter_service "$id")" != "$service" ]; then
         echo '{"error":"VPN-адаптер не подключён"}'
         exit
     fi
@@ -93,15 +92,32 @@ ows_vpn() (
     json_dump
 )
 
+ows_guides() (
+    . /usr/share/libubox/jshn.sh
+    . /usr/lib/ows/instructions.sh
+    if [ "$1" = instructions_list ]; then guide_list; exit $?; fi
+    request=$(head -c 120001) || exit 1
+    if [ "${#request}" -gt 120000 ] || ! json_load "$request"; then
+        guide_error 'Некорректный или слишком большой запрос.'; exit 0
+    fi
+    json_get_var id id
+    if [ "$1" = instructions_read ]; then
+        guide_read "$id" || exit 0
+    else
+        json_get_vars operation expected content
+        guide_edit "$operation" "$id" "$expected" "$content" || exit 0
+    fi
+)
+
 case "$1:$2" in
-    list:) echo '{"status":{},"job_status":{"job":""},"job_output":{"job":""},"catalog":{},"preview":{"profile":"","line":"","action":"","blob":"","expected":""},"apply_action":{"profile":"","line":"","action":"","blob":"","expected":""},"module_list":{},"module_status":{"id":""},"module_preview":{"manifest":""},"module_attach":{"manifest":""},"module_link":{"name":"","source":""},"stgws_info":{},"stgws_action":{"action":""},"tg_proxy_info":{},"tg_proxy_action":{"action":""},"steer_info":{},"steer_action":{"action":""},"vpn_state":{"id":""},"vpn_action":{"id":"","action":"","target":""},"vpn_editor":{"id":""},"vpn_nodes":{"id":"","target":""},"vpn_edit":{"id":"","change":""},"vpn_subscription_url":{"id":""},"vpn_list_page":{"job":"","kind":"","page":0,"search":""},"zapret_module_info":{"id":""},"zapret_module_action":{"id":"","action":""},"dns_info":{},"dns_check":{},"zapret_presets":{},"zapret_preset_preview":{"name":""},"zapret_preset_write":{"operation":"","name":"","expected":"","selection":""},"zapret_constructor":{"topic":""}}' ;;
+    list:) echo '{"instructions_list":{},"instructions_read":{"id":""},"instructions_write":{"operation":"","id":"","expected":"","content":""},"status":{},"job_status":{"job":""},"job_output":{"job":""},"catalog":{},"preview":{"profile":"","line":"","action":"","blob":"","expected":""},"apply_action":{"profile":"","line":"","action":"","blob":"","expected":""},"module_list":{},"module_status":{"id":""},"module_preview":{"manifest":""},"module_attach":{"manifest":""},"module_link":{"name":"","source":""},"stgws_info":{},"stgws_action":{"action":""},"tg_proxy_info":{},"tg_proxy_action":{"action":""},"steer_info":{},"steer_action":{"action":""},"vpn_state":{"id":""},"vpn_action":{"id":"","action":"","target":""},"vpn_editor":{"id":""},"vpn_nodes":{"id":"","target":""},"vpn_edit":{"id":"","change":""},"vpn_subscription_url":{"id":""},"vpn_list_page":{"job":"","kind":"","page":0,"search":""},"zapret_module_info":{"id":""},"zapret_module_action":{"id":"","action":""},"system_info":{},"system_action":{"action":""},"adblock_draft":{},"adblock_action":{"action":"","change":""},"domain_search":{"domain":""},"doh_info":{},"doh_action":{"action":""},"dns_info":{},"dns_check":{"domain":""},"zapret_presets":{},"zapret_preset_preview":{"name":""},"zapret_preset_write":{"operation":"","name":"","expected":"","selection":""},"zapret_constructor":{"topic":"","profile":"","list":"","page":0,"run":""}}' ;;
+    call:instructions_list|call:instructions_read|call:instructions_write) ows_guides "$2" ;;
     call:vpn_state|call:vpn_action|call:vpn_editor|call:vpn_nodes|call:vpn_edit|call:vpn_subscription_url) ows_vpn "$2" ;;
     call:tg_proxy_info|call:tg_proxy_action)
         . /usr/share/libubox/jshn.sh
         . /usr/lib/ows/tg-ws-proxy.sh
-        entry=/etc/ows/adapters/tg-ws-proxy.json
-        if [ "$(jsonfilter -i "$entry" -e '@.kind' 2>/dev/null)" != adapter ] ||
-            [ "$(jsonfilter -i "$entry" -e '@.service' 2>/dev/null)" != tg-ws-proxy ]; then
+        . /usr/lib/ows/registry.sh
+        if [ "$(registry_adapter_service tg-ws-proxy)" != tg-ws-proxy ]; then
             echo '{"error":"Адаптер tg-ws-proxy не подключён"}'
         elif [ "$2" = tg_proxy_info ]; then
             tgws_proxy_info
@@ -118,15 +134,96 @@ case "$1:$2" in
         fi
         ;;
     call:status) ows_status ;;
-    call:dns_info|call:dns_check)
+    call:dns_info)
         . /usr/lib/ows/dns.sh
-        if [ "$2" = dns_info ]; then
-            ows_dns_info
-        elif job=$(/usr/sbin/ows dns-check); then
-            printf '{"job":"%s"}\n' "$job"
-        else
-            echo '{"error":"Не удалось поставить проверку DNS в очередь"}'
+        . /usr/lib/ows/network-compat.sh
+        ows_dns_info
+        ;;
+    call:doh_info)
+        . /usr/lib/ows/doh.sh
+        . /usr/lib/ows/doh-live.sh
+        doh_info
+        ;;
+    call:domain_search)
+        . /usr/share/libubox/jshn.sh
+        json_load "$(cat)" || exit 1
+        json_get_var domain domain
+        [ "${#domain}" -le 254 ] || { echo '{"error":"Слишком длинное доменное имя"}'; exit 0; }
+        command -v jq >/dev/null && command -v timeout >/dev/null ||
+            { echo '{"error":"Для поиска нужны jq и timeout"}'; exit 0; }
+        timeout -k 2 12 sh /usr/lib/ows/domain-search.sh "$domain" ||
+            echo '{"error":"Поиск не завершился. Повторите запрос."}'
+        ;;
+    call:adblock_draft)
+        command -v jq >/dev/null || { echo '{"error":"Для настроек dnsmasq + nftables нужен jq"}'; exit 0; }
+        . /usr/lib/ows/adblock-migration.sh
+        . /usr/lib/ows/adblock-policy.sh
+        . /usr/lib/ows/adblock-live.sh
+        . /usr/lib/ows/adblock-update.sh
+        owner=zapret-manager
+        paused=false fast=false profile= mask=0 settings=null light_start=false light_dns_only=false legacy=false
+        if [ -f "$OWS_ADBLOCK_MANAGER" ]; then legacy=true; fi
+        if adblock_fast_enabled; then fast=true; fi
+        if adblock_owner; then
+            owner=ows
+            if draft=$(adblock_draft_path) && bank=$(adblock_active_bank "$draft"); then
+                if [ -f "$bank/paused" ]; then paused=true; fi
+                if selection=$(adblock_live_selection "$draft" "$bank") && adblock_valid_selection "$selection"; then
+                    profile=${selection%:*}; mask=${selection##*:}
+                fi
+                if adblock_dns_only_light "$draft" "$bank"; then light_dns_only=true; fi
+                settings=$(adblock_policy_report "$draft" "$bank") || settings=null
+            fi
+        elif adblock_first_available; then
+            light_start=true
         fi
+        adblock_draft_report | jq --arg owner "$owner" --arg profile "$profile" --argjson mask "$mask" \
+            --argjson paused "$paused" --argjson fast "$fast" --argjson settings "$settings" \
+            --argjson light_start "$light_start" --argjson light_dns_only "$light_dns_only" --argjson legacy "$legacy" \
+            '.owner=$owner | .active_profile=$profile | .ip_mask=$mask | .paused=$paused | .fast_enabled=$fast | .settings=$settings |
+             .light_start=$light_start | .light_dns_only=$light_dns_only | .legacy=$legacy'
+        ;;
+    call:system_info)
+        . /usr/lib/ows/zapret-module.sh
+        . /usr/lib/ows/system.sh
+        . /usr/lib/ows/system-handover.sh
+        . /usr/lib/ows/network-compat.sh
+        system_info
+        ;;
+    call:adblock_action|call:doh_action|call:system_action)
+        . /usr/share/libubox/jshn.sh
+        . /usr/lib/ows/rpc-response.sh
+        json_load "$(cat)" || exit 1
+        json_get_var action action
+        if [ "$2:$action" = adblock_action:edit ]; then
+            json_get_var change change
+            if [ -z "$change" ] || [ "${#change}" -gt 65535 ]; then
+                echo '{"error":"Пустой или слишком большой запрос"}'; exit 0
+            fi
+            umask 077
+            request=$(mktemp /tmp/ows-adblock-request.XXXXXX) || exit 1
+            trap 'rm -f "$request"' EXIT
+            printf '%s\n' "$change" > "$request" || exit 1
+            ows_rpc_enqueue 'Не удалось поставить изменение в очередь' adblock edit "$request"
+        else
+            ows_rpc_enqueue 'Не удалось поставить операцию в очередь' "${2%_action}" "$action"
+        fi
+        ;;
+    call:dns_check)
+        . /usr/share/libubox/jshn.sh
+        . /usr/lib/ows/rpc-response.sh
+        . /usr/lib/ows/dns.sh
+        json_load "$(cat)" || exit 1
+        json_get_var domain domain
+        set --
+        if [ -n "$domain" ]; then
+            if ! ows_dns_domain_valid "$domain"; then
+                echo '{"error":"Введите корректное доменное имя без протокола и пути"}'
+                exit 0
+            fi
+            set -- "$domain"
+        fi
+        ows_rpc_enqueue 'Не удалось поставить проверку DNS в очередь' dns-check "$@"
         ;;
     call:zapret_presets|call:zapret_preset_preview|call:zapret_preset_write)
         command -v jq >/dev/null || { echo '{"error":"Для пресетов Zapret2 нужен jq"}'; exit; }
@@ -138,7 +235,7 @@ case "$1:$2" in
                 request=$(cat)
                 operation=$(printf '%s\n' "$request" | jsonfilter -e '@.operation')
                 case "$operation" in
-                    save|delete|apply) printf '%s\n' "$request" | preset_request "$operation" ;;
+                    save|delete|apply|select) printf '%s\n' "$request" | preset_request "$operation" ;;
                     *) echo '{"error":"Неизвестная операция пресета"}' ;;
                 esac
                 ;;
@@ -147,16 +244,18 @@ case "$1:$2" in
     call:zapret_module_info|call:zapret_module_action|call:zapret_constructor)
         . /usr/share/libubox/jshn.sh
         json_load "$(cat)" || exit 1
-        json_get_vars id action topic
+        json_get_vars id action topic profile list page run
         . /usr/lib/ows/zapret-module.sh
         . /usr/lib/ows/zapret-constructor.sh
         RUN=/tmp/ows
         case "$2" in
             zapret_module_info) zapret_module_info "$id" ;;
-            zapret_constructor) zapret_constructor_state "$topic" ;;
+            zapret_constructor) zapret_constructor_state "$topic" "$profile" "$list" "$page" "$run" ;;
             zapret_module_action)
                 json_init
-                if [ "${#action}" -le 280 ] && zapret_module_action_allowed "$id" "$action" &&
+                limit=280
+                case "$action" in compare-start:*) limit=8192 ;; esac
+                if [ "${#action}" -le "$limit" ] && zapret_module_action_allowed "$id" "$action" &&
                     job=$(/usr/sbin/ows zapret "$id" "$action"); then
                     json_add_string job "$job"
                 else

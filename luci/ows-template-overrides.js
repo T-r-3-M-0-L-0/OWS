@@ -3,7 +3,8 @@
 
 // Local settings. Match each module by its manifest id and service.
 return baseclass.extend({
-    proxyGroup: {},
+    groups: {},
     modules: {},
+    system: {},
     panels: {}
 });

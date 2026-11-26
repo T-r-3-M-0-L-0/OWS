@@ -46,8 +46,41 @@ enqueue() (
             . "$LIB/tg-ws-proxy.sh"
             [ "$#" = 1 ] && tgws_proxy_action_allowed "$1" || fail 'Unknown Telegram proxy action'
             ;;
+        adblock)
+            if [ "${1:-}" = edit ]; then
+                [ "$#" = 2 ] && [ -f "$2" ] || fail 'Usage: ows adblock edit FILE'
+                payload=$2
+                set -- edit
+            fi
+            [ "$#" = 1 ] || fail 'Usage: ows adblock ACTION'
+            case "$1" in
+                prepare|check|refresh|schedule-plan|takeover|refresh-auto|refresh-live|schedule:on|schedule:off|pause|resume|edit|compact|expand|enable-light|install-fast) ;;
+                configure:*) . "$LIB/adblock-update.sh"; adblock_valid_selection "${1#configure:}" || fail 'Invalid adblock selection' ;;
+                *) fail 'Unknown adblock action' ;;
+            esac
+            ;;
         dns)
-            [ "$#" = 1 ] && [ "$1" = check ] || fail 'Unknown DNS action'
+            [ "$#" = 1 ] || fail 'Unknown DNS action'
+            case "$1" in
+                check) ;;
+                check:*)
+                    . "$LIB/dns.sh"
+                    ows_dns_domain_valid "${1#*:}" || fail 'Invalid DNS domain'
+                    ;;
+                *) fail 'Unknown DNS action' ;;
+            esac
+            ;;
+        doh)
+            [ "$#" = 1 ] || fail 'Usage: ows doh install|check|prepare|verify|takeover|test-switch|watch|configure:CURRENT:NEW'
+            case "$1" in
+                install|check|prepare|verify|takeover|test-switch|watch) ;;
+                configure:*) . "$LIB/doh-live.sh"; doh_configure_valid "${1#configure:}" || fail 'Invalid DoH chain' ;;
+                *) fail 'Unknown DoH action' ;;
+            esac
+            ;;
+        system)
+            . "$LIB/system.sh"
+            [ "$#" = 1 ] && system_action_valid "$1" || fail 'Unknown system action'
             ;;
         zapret-module)
             . "$LIB/zapret-module.sh"
@@ -70,6 +103,16 @@ enqueue() (
     prepare
     exec 8>"$RUN/submit.lock"
     flock -x 8
+    if [ "$kind" = doh ] && [ "$1" = watch ]; then
+        for ticket in "$QUEUE"/*; do
+            [ -f "$ticket" ] || continue
+            id=${ticket##*/}
+            if [ "$(cat "$JOBS/$id/kind" 2>/dev/null)" = doh ] && [ "$(cat "$JOBS/$id/action" 2>/dev/null)" = watch ]; then
+                printf '%s\n' "$id"
+                exit 0
+            fi
+        done
+    fi
     set -- "$1" "$(date +%s)"
     count=0
     for ticket in "$QUEUE"/*; do
@@ -125,11 +168,16 @@ recover() {
     fi
 }
 
+lock_zapret2() {
+    exec 5>/var/lock/zapret2-health.lock
+    exec 4>/var/lock/zapret2-strategy-check.lock
+    flock -n 5 && flock -n 4
+}
+
 process() (
     id=$1
     job=$JOBS/$id
-    exec 5>/var/lock/zapret2-health.lock
-    if ! flock -n 5; then
+    if ! lock_zapret2; then
         publish "$id" config_busy
         return
     fi
@@ -173,7 +221,52 @@ process_module() {
                     ;;
                 dns)
                     . "$LIB/dns.sh"
-                    ows_dns_check
+                    if [ "$action" = check ]; then ows_dns_check; else ows_dns_check_domain "${action#*:}"; fi
+                    ;;
+                doh)
+                    . "$LIB/doh.sh"
+                    . "$LIB/doh-live.sh"
+                    case "$action" in
+                        install) . "$LIB/packages.sh"; ows_install_repo_packages https-dns-proxy luci-app-https-dns-proxy ;;
+                        check) doh_check ;;
+                        prepare) ! doh_owned && doh_prepare ;;
+                        verify) ! doh_owned && doh_verify ;;
+                        takeover) doh_takeover ;;
+                        configure:*) doh_configure "${action#configure:}" ;;
+                        watch) doh_watch ;;
+                        test-switch) doh_test_switch ;;
+                        *) exit 1 ;;
+                    esac
+                    ;;
+                system)
+                    . "$LIB/zapret-module.sh"
+                    . "$LIB/system.sh"
+                    . "$LIB/system-handover.sh"
+                    . "$LIB/network-compat.sh"
+                    . "$LIB/network-handover.sh"
+                    case "$action" in net:takeover) . "$LIB/doh.sh"; . "$LIB/doh-live.sh" ;; esac
+                    system_execute "$action"
+                    ;;
+                adblock)
+                    . "$LIB/adblock-migration.sh"
+                    . "$LIB/adblock-policy.sh"
+                    . "$LIB/adblock-update.sh"
+                    . "$LIB/adblock-live.sh"
+                    case "$action" in
+                        prepare) ! adblock_owner && adblock_prepare_draft ;;
+                        check) if adblock_owner; then adblock_live_check; else adblock_check_draft; fi ;;
+                        refresh) ! adblock_owner && adblock_build_candidate ;;
+                        schedule-plan) ! adblock_owner && adblock_schedule_plan ;;
+                        takeover) adblock_apply_live takeover ;;
+                        compact) . "$LIB/adblock-storage.sh"; adblock_storage_compact ;;
+                        expand) . "$LIB/adblock-storage.sh"; adblock_storage_expand ;;
+                        enable-light) adblock_enable_light ;;
+                        install-fast) . "$LIB/packages.sh"; adblock_install_fast ;;
+                        refresh-auto|refresh-live|schedule:*|pause|resume|configure:*|edit)
+                            adblock_live_command "$action" "$JOBS/$id/payload"
+                            ;;
+                        *) exit 1 ;;
+                    esac
                     ;;
                 zapret-module)
                     . "$LIB/zapret-module.sh"
@@ -200,9 +293,9 @@ process_module() {
 }
 
 diagnostic_job() {
-    case "$1" in dns|netshift|tg-ws-proxy) ;; *) return 1 ;; esac
+    case "$1" in dns|doh|netshift|tg-ws-proxy) ;; *) return 1 ;; esac
     case "$1:$(cat "$JOBS/$2/action" 2>/dev/null)" in
-        dns:check|netshift:diag|tg-ws-proxy:check) return 0 ;;
+        dns:check|dns:check:*|doh:check|netshift:diag|tg-ws-proxy:check) return 0 ;;
         *) return 1 ;;
     esac
 }
@@ -247,7 +340,28 @@ worker() {
     . "$LIB/zapret2.sh"
     if [ -r "$LIB/stgws.sh" ]; then . "$LIB/stgws.sh"; fi
     for dep in uci cmp pgrep; do command -v "$dep" >/dev/null || fail "Missing dependency: $dep"; done
-    recover || return 1
+    if [ -d "$PENDING" ]; then (lock_zapret2 && recover) || return 1; fi
+    if [ -r "$LIB/system.sh" ]; then
+        . "$LIB/zapret-module.sh"
+        . "$LIB/system.sh"
+        . "$LIB/system-handover.sh"
+        . "$LIB/network-compat.sh"
+        . "$LIB/network-handover.sh"
+        network_handover_recover || fail 'Pending network handover needs recovery'
+        system_handover_recover || fail 'Pending system handover needs recovery'
+        system_recover || fail 'Pending system transaction needs recovery'
+    fi
+    if [ -r "$LIB/doh-live.sh" ]; then
+        . "$LIB/doh.sh"
+        . "$LIB/doh-live.sh"
+        doh_takeover_recover && doh_recover_switch || fail 'Pending DoH transaction needs recovery'
+    fi
+    if [ -r "$LIB/adblock-live.sh" ]; then
+        . "$LIB/adblock-migration.sh"
+        . "$LIB/adblock-policy.sh"
+        . "$LIB/adblock-live.sh"
+        adblock_live_recover || fail 'Pending adblock transaction needs recovery'
+    fi
     if [ -r "$LIB/vpn.sh" ]; then
         ( . "$LIB/vpn.sh"; ows_vpn_recover "$LIB" ) || fail 'Pending VPN transaction needs recovery'
     fi
@@ -281,6 +395,14 @@ worker() {
             stgws_tick || :
             next_stgws_tick=$(($(date +%s) + 60))
         fi
+        if command -v adblock_live_ensure >/dev/null && [ "$(date +%s)" -ge "${next_adblock_tick:-0}" ]; then
+            adblock_live_ensure || :
+            next_adblock_tick=$(($(date +%s) + 60))
+        fi
+        if command -v network_tick >/dev/null && [ "$(date +%s)" -ge "${next_network_tick:-0}" ]; then
+            network_tick 9>&- >/dev/null 2>&1 || :
+            next_network_tick=$(($(date +%s) + 60))
+        fi
         if [ "$(date +%s)" -ge "${next_cleanup:-0}" ]; then
             cutoff=$(($(date +%s) - 86400))
             remaining=0
@@ -303,7 +425,27 @@ case "${1:-}" in
     zapret) shift; enqueue zapret-module "$@" ;;
     stgws) shift; enqueue stgws "$@" ;;
     tg-ws-proxy) shift; enqueue tg-ws-proxy "$@" ;;
-    dns-check) shift; [ "$#" = 0 ] || fail 'Usage: ows dns-check'; enqueue dns check ;;
+    adblock) shift; enqueue adblock "$@" ;;
+    doh) shift; enqueue doh "$@" ;;
+    system)
+        shift
+        . "$LIB/system.sh"
+        . "$LIB/system-handover.sh"
+        [ "$#" = 1 ] && system_action_valid "$1" || fail 'Unknown system action'
+        case "$1" in
+            takeover) enqueue system "$1" ;;
+            ipv6:zapret2:*) system_require_control && system_ipv6_zapret2_queue "${1##*:}" ;;
+            *) system_require_control && enqueue system "$1" ;;
+        esac
+        ;;
+    dns-check)
+        shift
+        case "$#" in
+            0) enqueue dns check ;;
+            1) enqueue dns "check:$1" ;;
+            *) fail 'Usage: ows dns-check [DOMAIN]' ;;
+        esac
+        ;;
     worker)
         shift
         if [ "${1:-}" = --diagnostic ]; then diagnostic_worker; else worker "$@"; fi

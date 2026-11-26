@@ -14,10 +14,17 @@ config_current() {
     [ -z "$revision" ] || [ "$revision" = "$(config_revision "$CONFIG")" ]
 }
 
+zapret2_no_pending_changes() {
+    local changes delta
+    changes=$(uci -q changes zapret2) && [ -z "$changes" ] || return 1
+    for delta in /var/run/rpcd/uci-*/zapret2; do
+        [ ! -s "$delta" ] || return 1
+    done
+}
+
 validate_config() (
     [ -x "$SERVICE" ] && [ -s "$CONFIG" ] && [ -s "$1/candidate" ] || exit 1
-    changes=$(uci -q changes zapret2) || exit 1
-    [ -z "$changes" ] || exit 1
+    zapret2_no_pending_changes || { echo 'Сохраните или сбросьте черновик Zapret2 в LuCI или UCI.' >&2; exit 1; }
     stage=$(mktemp -d "$1/validate.XXXXXX") || exit 1
     trap 'rm -rf "$stage"' EXIT
     mkdir "$stage/delta" "$stage/override"
@@ -31,7 +38,7 @@ validate_config() (
     }
     mkdir "$stage/engine"
     cp /opt/zapret2/config "$stage/engine/config" || exit 1
-    UCI_CONFIG_DIR="$stage" ZAPRET_BASE="$stage/engine" sh "$GENERATOR" --check 9>&-
+    UCI_CONFIG_DIR="$stage" ZAPRET_BASE="$stage/engine" sh "$GENERATOR" --check 4>&- 5>&- 9>&-
 )
 
 zapret_dns_ready() {
@@ -52,8 +59,8 @@ save_snapshot() (
         { [ -z "$revision" ] || [ "$revision" = "$(config_revision "$tmp/previous")" ]; } &&
         cp "$1/candidate" "$tmp/candidate" &&
         printf '%s\n' "$2" > "$tmp/job" || exit 1
-    if zapret_dns_ready 9>&-; then : > "$tmp/check-dns"; fi
-    if zapret_https_ready 9>&-; then : > "$tmp/check-https"; fi
+    if zapret_dns_ready 4>&- 5>&- 9>&-; then : > "$tmp/check-dns"; fi
+    if zapret_https_ready 4>&- 5>&- 9>&-; then : > "$tmp/check-https"; fi
     mv "$tmp" "$3"
 )
 
@@ -69,15 +76,19 @@ restart_and_verify() {
     active=$(printf '%s\n' "$config" | awk -F= '
         $2=="strategy" {strategy[$1]=1}
         $1~/\.enabled$/ {sub(/\.enabled$/,"",$1); gsub(/\047/,"",$2); enabled[$1]=$2}
-        END {for (key in strategy) if (!(key in enabled) || enabled[key]~/^(1|on|yes|true|enabled)$/) n++; print n+0}
+        END {
+            if (!("zapret2.main" in enabled) || enabled["zapret2.main"]~/^(1|on|yes|true|enabled)$/)
+                for (key in strategy) if (!(key in enabled) || enabled[key]~/^(1|on|yes|true|enabled)$/) n++
+            print n+0
+        }
     ')
-    "$SERVICE" restart 5>&- 9>&- >/dev/null 2>&1 || return 1
+    "$SERVICE" restart 4>&- 5>&- 9>&- >/dev/null 2>&1 || return 1
     for delay in 1 2 3 4 5; do
         sleep 1
         if [ "$active" -eq 0 ] ||
-            { "$SERVICE" status 5>&- 9>&- >/dev/null 2>&1 && pgrep -x nfqws2 >/dev/null; }; then
-            if [ -f "$1/check-dns" ] && ! zapret_dns_ready 9>&-; then continue; fi
-            if [ -f "$1/check-https" ] && ! zapret_https_ready 9>&-; then continue; fi
+            { "$SERVICE" status 4>&- 5>&- 9>&- >/dev/null 2>&1 && pgrep -x nfqws2 >/dev/null; }; then
+            if [ -f "$1/check-dns" ] && ! zapret_dns_ready 4>&- 5>&- 9>&-; then continue; fi
+            if [ -f "$1/check-https" ] && ! zapret_https_ready 4>&- 5>&- 9>&-; then continue; fi
             return 0
         fi
     done

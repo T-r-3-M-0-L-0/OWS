@@ -1,6 +1,7 @@
 #!/bin/sh
 
 OWS_PRESETS=/etc/ows/zapret-presets
+ZAPRET_NATIVE_PRESETS=/etc/zapret2-presets
 
 preset_fail() { jq -nc --arg error "$*" '{error:$error}'; exit 0; }
 
@@ -12,27 +13,47 @@ preset_name() {
 preset_profiles() {
     awk -F= '
         $2=="strategy" && $1~/^zapret2\./ {sub(/^zapret2\./,"",$1); names[++n]=$1}
-        $1~/^zapret2\..*\.enabled$/ {sub(/^zapret2\./,"",$1); sub(/\.enabled$/,"",$1); gsub(/\047/,"",$2); enabled[$1]=$2}
+        $1~/^zapret2\..*\.(enabled|protocol|port|filter_l7)$/ {
+            split($1,p,"."); value=substr($0,length($1)+2); gsub(/[\047\t]/,"",value); values[p[2],p[3]]=value
+        }
         END {for(i=1;i<=n;i++) {
-            name=names[i]; print name "\t" (!(name in enabled) || enabled[name]~/^(1|on|yes|true|enabled)$/ ? "1" : "0")
+            name=names[i]
+            enabled=(!((name,"enabled") in values) || values[name,"enabled"]~/^(1|on|yes|true|enabled)$/)
+            print name "\t" (enabled ? "1" : "0") "\t" values[name,"protocol"] "\t" values[name,"port"] "\t" values[name,"filter_l7"]
         }}
     '
 }
 
+preset_snapshot() {
+    mkdir "$1/delta" "$1/override" && cp "$CONFIG" "$1/zapret2" &&
+        uci -q -c "$1" -C "$1/override" -t "$1/delta" show zapret2 > "$1/config" &&
+        preset_profiles < "$1/config" > "$1/profiles"
+}
+
+preset_names() {
+    local path name
+    for path in "$1"/*.txt; do
+        [ -f "$path" ] && [ ! -L "$path" ] || continue
+        name=${path##*/}; name=${name%.txt}
+        if preset_name "$name"; then printf '%s\n' "$name"; fi
+    done
+}
+
 preset_catalog() (
-    local config profiles
-    config=$(uci -q show zapret2) || preset_fail 'Конфигурация Zapret2 недоступна'
-    profiles=$(printf '%s\n' "$config" | preset_profiles)
-    {
-        for path in "$OWS_PRESETS"/*.txt; do
-            [ -f "$path" ] || continue
-            name=${path##*/}; name=${name%.txt}
-            preset_name "$name" || continue
-            printf '%s\n' "$name"
-        done
-    } | jq -Rsc --arg profiles "$profiles" '
-        {presets:split("\n")|map(select(length>0)),
-         profiles:($profiles|split("\n")|map(select(length>0)|split("\t")|{id:.[0],enabled:(.[1]=="1")}))}
+    local stage revision
+    . /usr/lib/ows/zapret2.sh
+    [ -f "$CONFIG" ] || preset_fail 'Установите Zapret2 во вкладке «Служба и пакеты», чтобы сохранять пресеты.'
+    umask 077
+    stage=$(mktemp -d /tmp/ows-preset.XXXXXX) || exit 1
+    trap 'rm -rf "$stage"' EXIT
+    preset_snapshot "$stage" || preset_fail 'Конфигурация Zapret2 недоступна'
+    revision=$(config_revision "$stage/zapret2") || exit 1
+    jq -nc --arg local "$(preset_names "$OWS_PRESETS")" --arg native "$(preset_names "$ZAPRET_NATIVE_PRESETS")" \
+        --arg revision "$revision" --rawfile profiles "$stage/profiles" '
+        def lines: split("\n")|map(select(length>0));
+        ($local|lines) as $own | ($native|lines) as $installed |
+        {revision:$revision, presets:(($own+$installed)|unique), native_presets:($installed-$own),
+         profiles:($profiles|lines|map(split("\t")|{id:.[0],enabled:(.[1]=="1"),protocol:.[2],port:.[3],filter:.[4]}))}
     '
 )
 
@@ -42,8 +63,10 @@ preset_request() (
     . /usr/lib/ows/zapret2.sh
     json_load "$(cat)" || preset_fail 'Некорректный запрос'
     json_get_vars name expected selection
-    preset_name "$name" || preset_fail 'Имя пресета должно состоять из строчных латинских букв, цифр и дефисов'
-    target=$OWS_PRESETS/$name.txt
+    if [ "$mode" != select ]; then
+        preset_name "$name" || preset_fail 'Имя пресета должно состоять из строчных латинских букв, цифр и дефисов'
+        target=$OWS_PRESETS/$name.txt
+    fi
     if [ "$mode" = delete ]; then
         [ -d "$OWS_PRESETS" ] || preset_fail 'Пресет не найден'
         exec 6>"$OWS_PRESETS/.lock"
@@ -56,18 +79,17 @@ preset_request() (
     umask 077
     stage=$(mktemp -d /tmp/ows-preset.XXXXXX) || exit 1
     trap 'rm -rf "$stage"' EXIT
-    mkdir "$stage/delta" "$stage/override" || exit 1
-    cp "$CONFIG" "$stage/zapret2" || preset_fail 'Конфигурация Zapret2 недоступна'
+    preset_snapshot "$stage" || preset_fail 'Конфигурация Zapret2 недоступна'
     revision=$(config_revision "$stage/zapret2") || exit 1
-    uci -q -c "$stage" -C "$stage/override" -t "$stage/delta" show zapret2 > "$stage/config" ||
-        preset_fail 'Не удалось прочитать профили Zapret2'
-    preset_profiles < "$stage/config" > "$stage/profiles"
     [ -s "$stage/profiles" ] || preset_fail 'Стратегии Zapret2 не найдены'
-    if [ "$mode" = save ]; then
+    if [ "$mode" = save ] || [ "$mode" = select ]; then
+        [ "$mode" != select ] || [ "$expected" = "$revision" ] ||
+            preset_fail 'Настройки Zapret2 изменились. Обновите список профилей.'
         [ "${#selection}" -le 8192 ] || preset_fail 'Список стратегий слишком большой'
         printf '%s\n' "$selection" > "$stage/input"
     else
-        [ -f "$target" ] && [ "$(wc -c < "$target")" -le 8192 ] && cp "$target" "$stage/input" ||
+        if [ ! -e "$target" ] && [ ! -L "$target" ]; then target=$ZAPRET_NATIVE_PRESETS/$name.txt; fi
+        [ -f "$target" ] && [ ! -L "$target" ] && [ "$(wc -c < "$target")" -le 8192 ] && cp "$target" "$stage/input" ||
             preset_fail 'Пресет отсутствует или превышает 8 КиБ'
     fi
     if ! awk -F '\t' '
@@ -84,6 +106,9 @@ preset_request() (
         mkdir -p "$OWS_PRESETS" || exit 1
         exec 6>"$OWS_PRESETS/.lock"
         flock -n 6 || preset_fail 'Каталог пресетов занят'
+        if [ ! -f "$target" ] && [ -f "$ZAPRET_NATIVE_PRESETS/$name.txt" ]; then
+            preset_fail 'Это имя уже занято штатным пресетом. Выберите другое имя.'
+        fi
         count=$(find "$OWS_PRESETS" -maxdepth 1 -name '*.txt' -type f | wc -l)
         [ -f "$target" ] || [ "$count" -lt 32 ] || preset_fail 'Достигнут лимит пресетов'
         temporary=$(mktemp "$OWS_PRESETS/.preset.XXXXXX") || exit 1
@@ -101,12 +126,13 @@ preset_request() (
         {flag=($1 in selected ? 1 : 0); if (flag!=$2) print $1 "\t" flag}
     ' "$stage/selected" "$stage/profiles" > "$stage/changes"
     if [ "$mode" = preview ]; then
-        jq -Rsc --arg token "$token" '
-            {token:$token,changes:(split("\n")|map(select(length>0)|split("\t")|{id:.[0],enabled:(.[1]=="1")}))}
+        jq -Rsc --arg token "$token" --arg revision "$revision" --rawfile selected "$stage/selected" '
+            {token:$token,revision:$revision,selected:($selected|split("\n")|map(select(length>0))),
+             changes:(split("\n")|map(select(length>0)|split("\t")|{id:.[0],enabled:(.[1]=="1")}))}
         ' "$stage/changes"
         exit
     fi
-    [ "$mode" = apply ] && [ "$expected" = "$token" ] ||
+    [ "$mode" = select ] || { [ "$mode" = apply ] && [ "$expected" = "$token" ]; } ||
         preset_fail 'Конфигурация или пресет изменились. Повторите предпросмотр'
     [ -s "$stage/changes" ] || { echo '{"ok":true}'; exit; }
     while read -r profile flag; do

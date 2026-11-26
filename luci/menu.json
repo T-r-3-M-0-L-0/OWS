@@ -6,7 +6,7 @@
     "depends": { "acl": ["luci-app-ows"] }
   },
   "admin/services/ows-native-zapret2": {
-    "action": { "type": "view", "path": "zapret2/loader" },
+    "action": { "type": "view", "path": "ows-native-zapret2" },
     "depends": {
       "acl": ["luci-app-zapret2"],
       "fs": { "/www/luci-static/resources/view/zapret2/loader.js": "file" }

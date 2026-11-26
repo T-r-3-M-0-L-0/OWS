@@ -1,8 +1,9 @@
 'use strict';
 'require baseclass';
-'require view.ows-native as nativeView';
+'require view.ows-dns as dns';
 'require view.ows-service as serviceView';
 'require view.ows-stgws as stgws';
+'require view.ows-system-templates as systemTemplates';
 'require view.ows-vpn-panel as vpn';
 
 function vpnTab(entry, context, template) {
@@ -10,8 +11,15 @@ function vpnTab(entry, context, template) {
 }
 
 var defaults = {
+    steer: {
+        service: 'steer',
+        group: 'vpn',
+        releaseInstall: true
+    },
     netshift: {
         service: 'netshift',
+        group: 'vpn',
+        releaseInstall: true,
         renderStatus: function(data, actions) {
             return [
                 E('p', {}, !data.installed ? _('NetShift не установлен') : data.running ?
@@ -30,7 +38,8 @@ var defaults = {
     },
     'tg-ws-proxy': {
         service: 'tg-ws-proxy',
-        proxy: true,
+        group: 'telegram-proxy',
+        releaseInstall: true,
         tab: function(entry, context, template) { return serviceView.tab(entry, context.followJob, template); },
         statusMethod: 'tg_proxy_info',
         actionMethod: 'tg_proxy_action',
@@ -53,17 +62,16 @@ var defaults = {
     },
     'adblock-fast': {
         service: 'adblock-fast',
+        label: _('Блокировка рекламы'),
         native: { route: 'adblock-fast', acl: 'luci-app-adblock-fast' },
         tab: function(entry, context, template) {
-            if (!template.native) return null;
-            var native = nativeView.tab(Object.assign({}, template.native, { id: 'module-' + entry.id }));
-            native.label = entry.name;
-            return native;
+            return dns.adblockTab(entry, context, template.native);
         }
     },
     stgws: {
         service: 'tgws',
-        proxy: true,
+        group: 'telegram-proxy',
+        sourceLabel: _('Инструкция по установке sTGWS'),
         tab: function(entry, context) { return stgws.tab(entry, context.createTabs, context.followJob); }
     }
 };
@@ -86,9 +94,14 @@ return baseclass.extend({
         });
     },
 
-    proxyGroup: function() {
-        return Object.assign({ label: _('Прокси'), sectionsLabel: _('Модули прокси'),
-            empty: _('Добавьте адаптер прокси через «Обзор».') }, this.overrides && this.overrides.proxyGroup);
+    group: function(id) {
+        var standard = id === 'vpn' ? {
+            label: _('VPN'), sectionsLabel: _('Модули VPN'), empty: _('Добавьте адаптер VPN через «Обзор».')
+        } : {
+            label: _('ТГ-прокси'), sectionsLabel: _('Модули ТГ-прокси'), empty: _('Добавьте адаптер ТГ-прокси через «Обзор».')
+        };
+        var local = this.overrides && this.overrides.groups;
+        return Object.assign(standard, local && local[id]);
     },
 
     panel: function(tab) {
@@ -98,11 +111,19 @@ return baseclass.extend({
         return Object.assign({}, tab, typeof override === 'function' ? override(tab) : override, { id: tab.id });
     },
 
+    system: function(followJob) {
+        return systemTemplates.tabs(followJob, this.overrides && this.overrides.system);
+    },
+
     resolve: function(entry, drivers) {
         var isVPN = vpn.supports(entry, drivers);
         var standard = matched(defaults, entry);
         var override = matched(this.overrides && this.overrides.modules, entry);
-        var template = Object.assign({ proxy: isVPN || entry.category === 'proxy', tab: isVPN ? vpnTab : null }, standard, override);
+        var group = isVPN ? 'vpn' : entry.category === 'proxy' ? 'telegram-proxy' : entry.category;
+        var template = Object.assign({ group: group, tab: isVPN ? vpnTab : null }, standard, override);
+        if (override && override.group == null && typeof override.proxy === 'boolean') {
+            template.group = override.proxy ? (template.group || 'telegram-proxy') : '';
+        }
         if (standard && standard.native && override && override.native) {
             template.native = Object.assign({}, standard.native, override.native);
         }

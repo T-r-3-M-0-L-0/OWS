@@ -4,6 +4,7 @@
   "name": "steer",
   "version": "0.1.0",
   "service": "steer",
-  "category": "proxy",
+  "category": "vpn",
+  "source": "https://github.com/splify2/releases/releases",
   "description": "Состояние ядра, выходы и локальная проверка подписок steer."
 }

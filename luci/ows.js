@@ -8,15 +8,15 @@
 'require view.ows-templates as templates';
 'require view.ows-zapret as zapret';
 'require view.ows-zapret-tools as zapretTools';
+'require view.ows-zapret-tactics as zapretTactics';
 'require view.ows-dns as dns';
+'require view.ows-doh as doh';
+'require view.ows-domain-search as domainSearch';
+'require view.ows-instructions as instructions';
 
 var status = rpc.declare({ object: 'ows', method: 'status' });
 var jobStatus = rpc.declare({ object: 'ows', method: 'job_status', params: ['job'] });
 var jobOutput = rpc.declare({ object: 'ows', method: 'job_output', params: ['job'] });
-var catalog = rpc.declare({ object: 'ows', method: 'catalog' });
-var parameters = ['profile', 'line', 'action', 'blob', 'expected'];
-var preview = rpc.declare({ object: 'ows', method: 'preview', params: parameters });
-var applyAction = rpc.declare({ object: 'ows', method: 'apply_action', params: parameters });
 var moduleList = rpc.declare({ object: 'ows', method: 'module_list' });
 var moduleStatus = rpc.declare({ object: 'ows', method: 'module_status', params: ['id'] });
 var modulePreview = rpc.declare({ object: 'ows', method: 'module_preview', params: ['manifest'] });
@@ -62,7 +62,7 @@ function statusLabel(result, template) {
     if (result.kind === 'zapret-module') {
         var parts = (result.action || '').split(':');
         var operation = {
-            download:_('Скачивание пакетов'), install:_('Установка пакетов'),
+            download:_('Скачивание пакетов'), install:_('Установка пакетов'), 'install-latest':_('Установка пакетов'),
             start:_('Запуск'), stop:_('Остановка'), restart:_('Перезапуск'),
             enable:_('Включение автозапуска'), disable:_('Выключение автозапуска'),
             'compare-start':_('Сравнение стратегий'), 'compare-stop':_('Остановка сравнения'),
@@ -71,6 +71,14 @@ function statusLabel(result, template) {
         return (parts[0] === 'zapret2' ? 'Zapret2' : 'Zapret') + ' · ' + operation + ' · ' + label;
     }
     if (result.kind === 'dns') return _('Проверка DNS') + ' · ' + label;
+    if (result.kind === 'doh') return 'DoH · ' + (result.action === 'install' ? _('Установка пакетов') + ' · ' : '') + label;
+    if (result.kind === 'system') {
+        var systemNames = {quic:_('Блокировка QUIC'),ipv6:_('IPv6 в Zapret'),zram:'ZRAM',
+            takeover:_('Передача системных модулей'),net:_('Сетевые исключения')};
+        return (systemNames[(result.action || '').split(':')[0]] || _('Система')) + ' · ' + label;
+    }
+    if (result.kind === 'adblock') return (result.action === 'install-fast' ? _('Установка AdBlock Fast') :
+        _('Блокировка рекламы')) + ' · ' + label;
     if (result.kind && result.kind !== 'stgws' && result.kind !== 'zapret2') {
         var operation = result.action === 'diag' ? _('Диагностика') :
             result.action === 'prepare-migration' ? _('Подготовка переноса') :
@@ -152,50 +160,24 @@ function createTabs(name, tabs, initial, onChange) {
     return {
         content: content,
         select: function(index) { select(index, true); },
+        selectId: function(id) {
+            var index = tabs.findIndex(function(tab) { return tab.id === id; });
+            if (index < 0) return false;
+            select(index, true);
+            return true;
+        },
+        activate: function() { if (tabs[active].activate) tabs[active].activate(); },
         selectedId: function() { return tabs[active].id; }
     };
-}
-
-function renderResources(container, data) {
-    var profiles = data.profiles || [];
-    var names = data.blobs || [];
-    var usage = Object.create(null);
-
-    profiles.forEach(function(profile) {
-        var used = Object.create(null);
-        var matches = (profile.script || '').matchAll(/(?:^|:)\s*(?:blob|seqovl_pattern)=([A-Za-z0-9_]+)(?=[:\s]|$)/gm);
-        for (var match of matches) used[match[1]] = true;
-        Object.keys(used).forEach(function(name) {
-            if (!usage[name]) usage[name] = [];
-            usage[name].push(profile.name);
-        });
-    });
-
-    var rows = names.map(function(name) {
-        return E('tr', { class: 'tr' }, [
-            E('td', { class: 'td' }, E('code', {}, name)),
-            E('td', { class: 'td' }, (usage[name] || []).join(', ') || '—')
-        ]);
-    });
-    container.replaceChildren(
-        E('h4', {}, _('Доступные blob')),
-        rows.length ? E('table', { class: 'table ows-blob-table' }, [
-            E('thead', {}, E('tr', { class: 'tr table-titles' }, [
-                E('th', { class: 'th', scope: 'col' }, _('Blob')),
-                E('th', { class: 'th', scope: 'col' }, _('Тактики'))
-            ])),
-            E('tbody', {}, rows)
-        ]) : E('p', {}, _('Нет доступных blob'))
-    );
 }
 
 function field(id, label, input) {
     return E('div', { class: 'ows-field' }, [E('label', { for: id }, label), input]);
 }
 
-function entrySource(entry) {
+function entrySource(entry, label) {
     if (!/^https:\/\//.test(entry.source || '')) return null;
-    return E('a', { href: entry.source, target: '_blank', rel: 'noopener noreferrer' }, _('Открыть источник'));
+    return E('a', { href: entry.source, target: '_blank', rel: 'noopener noreferrer' }, label || _('Открыть источник'));
 }
 
 function adapterTab(entry) {
@@ -241,7 +223,7 @@ function adapterCatalog(onChange) {
         refresh.disabled = true;
         return moduleList().then(function(result) {
             if (result.error) notice.textContent = result.error;
-            else onChange(result.entries || [], result.vpn_drivers || {});
+            else onChange(result.entries || [], result.vpn_drivers || {}, result.installed || {});
         }, function() {
             notice.textContent = _('Не удалось прочитать каталог');
         }).finally(function() { refresh.disabled = false; });
@@ -284,7 +266,8 @@ function adapterCatalog(onChange) {
                 previewPane.replaceChildren(
                     E('h4', {}, result.name),
                     E('p', {}, [result.version, ' · ', E('code', {}, result.service),
-                        result.category === 'proxy' ? ' · ' + _('Прокси') : '']),
+                        result.category === 'vpn' || result.category === 'telegram-proxy' ?
+                            ' · ' + templates.group(result.category).label : '']),
                     E('p', {}, result.description || ''),
                     attach
                 );
@@ -344,13 +327,6 @@ return view.extend({
         var nextRefresh = 0;
         var jobObservers = Object.create(null);
         var moduleTemplates = Object.create(null);
-        var editor = E('div');
-        var resources = E('div');
-        var catalogLoaded = false;
-        var catalogRequest = null;
-        var notice = E('p', { 'aria-live': 'polite' });
-        var refreshButton = E('button', { 'type': 'button', 'class': 'cbi-button' }, _('Обновить тактики'));
-
         function loadOutput() {
             var id = outputJob;
             if (!details.open || !id) return;
@@ -411,223 +387,150 @@ return view.extend({
             refresh(true);
         }
 
-        function option(value, title) {
-            return E('option', { value: value }, title || value);
-        }
-
-        function build(data) {
-            var profiles = data.profiles || [];
-            if (!profiles.length) {
-                editor.replaceChildren(E('p', {}, _('В конфигурации нет тактик')));
-                return;
-            }
-            var profile = E('select', { id: 'ows-profile', class: 'cbi-input-select' },
-                profiles.map(function(item) { return option(item.name); }));
-            var line = E('select', { id: 'ows-line', class: 'cbi-input-select' });
-            var action = E('select', { id: 'ows-action', class: 'cbi-input-select' }, ['fake', 'multisplit', 'multidisorder'].map(function(name) {
-                return option(name);
-            }));
-            var blob = E('select', { id: 'ows-blob', class: 'cbi-input-select' }, [option('', _('Выберите blob'))].concat(
-                (data.blobs || []).map(function(name) { return option(name); })));
-            var reviewButton = E('button', { type: 'button', 'class': 'cbi-button' }, _('Предпросмотр'));
-            var applyButton = E('button', { type: 'button', 'class': 'cbi-button cbi-button-apply', disabled: '' }, _('Поставить в очередь'));
-            var review = E('div', { class: 'ows-review' });
-            var approved = null;
-            var change = 0;
-            var busy = false;
-
-            function invalidate() {
-                change++;
-                approved = null;
-                applyButton.disabled = true;
-                review.replaceChildren();
-                blob.disabled = action.value !== 'fake';
-            }
-
-            function loadLines() {
-                var script = profiles[profile.selectedIndex].script || '';
-                var items = [option('0', _('Добавить действие в конец'))];
-                script.split('\n').forEach(function(text, index) {
-                    if (/^\s*--lua-desync=[A-Za-z0-9_]+(?::[^\s"'\\]+)?\s*$/.test(text)) {
-                        items.push(option(String(index + 1), text.trim()));
-                    }
-                });
-                line.replaceChildren.apply(line, items);
-                loadAction();
-            }
-
-            function loadAction() {
-                var script = profiles[profile.selectedIndex].script || '';
-                var text = script.split('\n')[Number(line.value) - 1] || '';
-                var name = text.trim().match(/^--lua-desync=([A-Za-z0-9_]+)/);
-                var assigned = text.match(/:blob=([A-Za-z0-9_]+)(?=:|\s|$)/);
-                action.value = name && ['fake', 'multisplit', 'multidisorder'].indexOf(name[1]) >= 0 ? name[1] : 'fake';
-                blob.value = assigned && (data.blobs || []).indexOf(assigned[1]) >= 0 ? assigned[1] : '';
-                invalidate();
-            }
-
-            profile.addEventListener('change', loadLines);
-            line.addEventListener('change', loadAction);
-            action.addEventListener('change', invalidate);
-            blob.addEventListener('change', invalidate);
-            reviewButton.addEventListener('click', function() {
-                if (busy) return;
-                invalidate();
-                var version = change;
-                var request = [profile.value, line.value, action.value, blob.disabled ? '' : blob.value, data.revision];
-                notice.textContent = _('Проверяем выбранное действие');
-                preview.apply(null, request).then(function(result) {
-                    if (version !== change) return;
-                    notice.textContent = result.error || '';
-                    if (result.error) return;
-                    review.replaceChildren(
-                        E('div', {}, [E('h4', {}, _('До')), E('pre', {}, String(result.before || ''))]),
-                        E('div', {}, [E('h4', {}, _('После')), E('pre', {}, String(result.after || ''))])
-                    );
-                    if (result.before !== result.after) {
-                        approved = request;
-                        applyButton.disabled = false;
-                    } else {
-                        notice.textContent = _('Изменений нет');
-                    }
-                }, function() {
-                    if (version === change) notice.textContent = _('Не удалось получить предпросмотр');
-                });
-            });
-
-            applyButton.addEventListener('click', function() {
-                if (!approved || busy) return;
-                busy = true;
-                applyButton.disabled = true;
-                applyAction.apply(null, approved).then(function(result) {
-                    busy = false;
-                    if (!result.job) {
-                        notice.textContent = result.error || _('Не удалось поставить задание в очередь');
-                        return;
-                    }
-                    invalidate();
-                    notice.textContent = _('Задание поставлено в очередь. После завершения обновите тактики.');
-                    followJob(result.job);
-                }, function() {
-                    busy = false;
-                    notice.textContent = _('Не удалось отправить задание. Проверьте права на запись.');
-                });
-            });
-
-            loadLines();
-            editor.replaceChildren(
-                E('div', { class: 'ows-fields' }, [
-                    field('ows-profile', _('Тактика'), profile),
-                    field('ows-line', _('Шаг'), line),
-                    field('ows-action', _('Lua-действие'), action),
-                    field('ows-blob', _('Blob для fake'), blob)
-                ]),
-                E('div', { class: 'ows-actions' }, [reviewButton, applyButton]), review
-            );
-        }
-
-        function loadCatalog() {
-            if (catalogRequest) return catalogRequest;
-            refreshButton.disabled = true;
-            editor.replaceChildren();
-            resources.replaceChildren();
-            notice.textContent = _('Читаем тактики zapret2');
-            catalogRequest = catalog().then(function(data) {
-                notice.textContent = data.error || '';
-                if (data.error) return;
-                build(data);
-                renderResources(resources, data);
-                catalogLoaded = true;
-            }, function() {
-                notice.textContent = _('Не удалось прочитать тактики');
-            }).finally(function() {
-                refreshButton.disabled = false;
-                catalogRequest = null;
-            });
-            return catalogRequest;
-        }
-
         var classicModule = zapret.init('zapret', followJob);
-        var zapret2Module = zapret.init('zapret2', followJob);
-        var nativeHash = '#ows-tab-zapret2-native-panel';
-        var openNative = window.location.hash === nativeHash;
+        var zapret2Module = zapret.init('zapret2', followJob, {
+            revision: zapretTools.profileRevision,
+            onNativeLoad: function() { refreshZapret2Tab('zapret2-presets'); },
+            onApplied: onZapretConfigApplied
+        });
+        var zapret2Hashes = {
+            'zapret2-native': '#ows-tab-zapret2-native-panel',
+            'zapret2-presets': '#ows-tab-zapret2-presets-panel'
+        };
+        var presetSectionHashes = {
+            'zapret2-tactics': '#ows-tab-zapret2-tactics-panel',
+            'zapret2-comparison': '#ows-tab-zapret2-comparison-panel',
+            'zapret2-classification': '#ows-tab-zapret2-classification-panel',
+            'zapret2-nfqueue': '#ows-tab-zapret2-nfqueue-panel',
+            'zapret2-recovery': '#ows-tab-zapret2-recovery-panel'
+        };
+        var resourceAlias = '#ows-tab-zapret2-resources-panel';
+        var showResources = window.location.hash === resourceAlias;
+        var presetSection = showResources ? 'zapret2-tactics' : Object.keys(presetSectionHashes).find(function(id) {
+            return presetSectionHashes[id] === window.location.hash;
+        });
+        var presetAliases = ['#ows-tab-zapret2-constructor-panel', resourceAlias].concat(Object.values(presetSectionHashes));
+        var instructionsHash = '#ows-tab-instructions-panel';
+        var zapret2Start = presetAliases.includes(window.location.hash) ? 'zapret2-presets' :
+            Object.keys(zapret2Hashes).find(function(id) { return zapret2Hashes[id] === window.location.hash; });
         var modules;
 
-        function rememberNativeTab(active) {
-            if (active && window.location.hash !== nativeHash)
-                window.history.replaceState(window.history.state, '', nativeHash);
-            else if (!active && window.location.hash === nativeHash)
+        function refreshZapret2Tab(id) {
+            if (modules && modules.selectedId() === 'zapret2' && zapret2.selectedId() === id) zapret2.activate();
+        }
+
+        function onZapretConfigApplied() {
+            refreshZapret2Tab('zapret2-native');
+            if (modules && modules.selectedId() === 'zapret2' && zapret2.selectedId() === 'zapret2-presets' &&
+                presetTab.selectedSection() === 'zapret2-tactics') tacticsTab.activate();
+        }
+
+        function rememberZapret2Tab(id, section) {
+            var hash = (id === 'zapret2-presets' && presetSectionHashes[section || presetTab.selectedSection()]) || zapret2Hashes[id];
+            if (hash === presetSectionHashes['zapret2-tactics'] && window.location.hash === resourceAlias) return;
+            if (hash && window.location.hash !== hash)
+                window.history.replaceState(window.history.state, '', hash);
+            else if (!hash && (Object.values(zapret2Hashes).includes(window.location.hash) ||
+                presetAliases.includes(window.location.hash) || window.location.hash === instructionsHash))
                 window.history.replaceState(window.history.state, '', window.location.pathname + window.location.search);
         }
 
-        refreshButton.addEventListener('click', function() {
-            catalogLoaded = false;
-            zapret2Module.refresh();
-            loadCatalog();
-        });
         var classicTabs = createTabs(_('Разделы Zapret'), [
             {id:'zapret-service',label:_('Служба и пакеты'),content:classicModule.status},
             classicModule.native
-        ]);
+        ].map(function(tab) { return templates.panel(tab); }));
+        var tacticsTab = templates.panel(zapretTactics.tab(followJob, {
+            showResources:showResources,
+            panel:function(tab) { return templates.panel(tab); },
+            onApplied:function() { refreshZapret2Tab('zapret2-native'); }
+        }));
+        var presetTab = templates.panel(zapretTools.presets(followJob,
+            {content:zapret2Module.constructor, activate:zapret2Module.loadConstructor},
+            onZapretConfigApplied, {
+                panel:function(tab) { return templates.panel(tab); }, createTabs:createTabs, section:presetSection,tactics:tacticsTab,
+                onSectionChange:function(id) {
+                    if (modules && modules.selectedId() === 'zapret2' && zapret2.selectedId() === 'zapret2-presets')
+                        rememberZapret2Tab('zapret2-presets', id);
+                }
+            }));
         var zapret2 = createTabs(_('Разделы Zapret2'), [
             { id: 'zapret2-service', label: _('Служба и пакеты'), content: zapret2Module.status },
-            { id: 'zapret2-tactics', label: _('Тактики'), content: editor, activate: function() {
-                if (!catalogLoaded) loadCatalog();
-            } },
-            { id: 'zapret2-resources', label: _('Ресурсы'), content: resources, activate: function() {
-                if (!catalogLoaded) loadCatalog();
-            } },
-            zapret2Module.native,
-            { id: 'zapret2-constructor', label: _('Конструктор Zapret2'), content: zapret2Module.constructor,
-                activate: zapret2Module.loadConstructor },
-            templates.panel(zapretTools.presets(followJob)),
-            templates.panel(zapretTools.comparison(followJob))
-        ], openNative ? zapret2Module.native.id : null, function(id) {
-            if (modules && modules.selectedId() === 'zapret2') rememberNativeTab(id === zapret2Module.native.id);
+            zapret2Module.native
+        ].map(function(tab) { return templates.panel(tab); }).concat(presetTab), zapret2Start, function(id) {
+            if (modules && modules.selectedId() === 'zapret2') rememberZapret2Tab(id);
         });
         var workspace = E('div');
+        var instructionsTab = templates.panel(instructions.tab());
         var registry = adapterCatalog(renderModules);
-        var selectedProxy;
+        var systemTabs = createTabs(_('Системные модули'), templates.system(followJob));
+        var systemPanel = templates.panel({id:'overview-system',content:E('section', {class:'ows-service-preview'}, [
+            E('h4', {}, _('Системные модули')), systemTabs.content
+        ]),activate:systemTabs.activate});
+        var domainTargets;
+        var domainPanel = domainSearch.panel(function(match) {
+            var open = domainTargets[match.module];
+            return open ? open(match) : false;
+        });
+        var selectedGroup = Object.create(null);
         var zapret2Panel = E('div', {}, [
-            E('div', { class: 'ows-module-heading' }, [E('h3', {}, _('Zapret2')), refreshButton]),
-            notice, zapret2.content, zapret2Module.feedback
+            E('div', { class: 'ows-module-heading' }, E('h3', {}, _('Zapret2'))),
+            zapret2.content, zapret2Module.feedback
         ]);
 
-        function renderModules(entries, vpnDrivers) {
+        function renderModules(entries, vpnDrivers, installed) {
             moduleTemplates = Object.create(null);
+            domainTargets = Object.create(null);
+            domainTargets.zapret2 = function() {
+                if (!modules.selectId('zapret2')) return false;
+                return zapret2.selectId(zapret2Module.native.id);
+            };
             var tabs = [
-                { id: 'overview', label: _('Обзор'), content: registry.content },
-                { id: 'zapret2', label: _('Zapret2'), activate: zapret2Module.refresh, content: zapret2Panel },
+                { id: 'overview', label: _('Обзор'), activate:systemPanel.activate,
+                    content: [templates.panel({id:'domain-search', content:domainPanel}).content, registry.content] },
+                { id: 'zapret2', label: _('Zapret2'), content: zapret2Panel, activate: function() {
+                    zapret2Module.refresh();
+                    zapret2.activate();
+                } },
                 { id: 'zapret', label: _('Zapret'), activate: classicModule.refresh,
                     content: E('div', {}, [E('h3', {}, _('Zapret')), classicTabs.content, classicModule.feedback]) }
-            ];
+            ].map(function(tab) { return templates.panel(tab); });
+            tabs.push(instructionsTab);
             var rows = [
-                {name:'Zapret2',description:_('Движок nfqws2, редактор тактик и конструктор'),tab:1},
-                {name:'Zapret',description:_('Первая версия, движок nfqws'),tab:2}
+                {name:'Zapret2',description:_('Движок nfqws2, редактор тактик и конструктор'),tab:1,installed:installed.zapret2,
+                    open:function() { zapret2.selectId('zapret2-service'); }},
+                {name:'Zapret',description:_('Первая версия, движок nfqws'),tab:2,installed:installed.zapret,
+                    open:function() { classicTabs.selectId('zapret-service'); }},
+                {content:systemPanel.content}
             ];
-            var proxyTabs = [];
-            var proxyContent = E('div');
-            var proxyTabIndex = tabs.length;
-            var proxyModules;
-            var proxyGroup = templates.proxyGroup();
+            var groups = Object.create(null);
             var context = { createTabs: createTabs, followJob: followJob };
 
-            function openProxies(index) {
-                if (proxyModules) {
-                    if (index != null) proxyModules.select(index);
-                    return;
-                }
-                if (!proxyTabs.length) {
-                    proxyContent.replaceChildren(E('p', {}, proxyGroup.empty));
-                    return;
-                }
-                proxyModules = createTabs(proxyGroup.sectionsLabel, proxyTabs, index == null ? selectedProxy : index,
-                    function(id) { selectedProxy = id; });
-                proxyContent.replaceChildren(proxyModules.content);
-            }
+            ['vpn', 'telegram-proxy'].forEach(function(id) {
+                var group = templates.group(id);
+                var content = E('div');
+                var children = [];
+                var nested;
 
-            tabs.push({ id: 'proxies', label: proxyGroup.label, content: proxyContent, activate: openProxies });
+                function open(index) {
+                    if (nested) {
+                        if (index != null) nested.select(index);
+                        return;
+                    }
+                    if (!children.length) {
+                        content.replaceChildren(E('p', {}, group.empty));
+                        return;
+                    }
+                    nested = createTabs(group.sectionsLabel, children, index == null ? selectedGroup[id] : index,
+                        function(tabId) { selectedGroup[id] = tabId; });
+                    content.replaceChildren(nested.content);
+                }
+
+                groups[id] = { index: tabs.length, tabs: children, open: open };
+                tabs.push({ id: id, label: group.label, content: content, activate: open });
+            });
             tabs.push(templates.panel(dns.tab(followJob)));
+            rows.push({name:'DoH',description:_('DNS через HTTPS'),tab:tabs.length,installed:installed.doh});
+            tabs.push(templates.panel(doh.tab(followJob)));
             entries.forEach(function(entry) {
                 if (entry.id === 'zapret' || entry.id === 'zapret2') return;
                 if (entry.kind !== 'adapter') {
@@ -636,45 +539,74 @@ return view.extend({
                 }
                 var template = templates.resolve(entry, vpnDrivers);
                 moduleTemplates[entry.id] = template;
-                if (template.label) entry = Object.assign({}, entry, { name: template.label });
+                entry = Object.assign({}, entry, {
+                    name: template.label || entry.name,
+                    sourceLabel: template.releaseInstall ? (entry.installed === false ? _('Установить из релиза') : _('Релизы')) :
+                        template.sourceLabel
+                });
                 var tab = (template.tab && template.tab(entry, context, template)) || adapterTab(entry);
-                if (template.proxy) {
-                    rows.push(Object.assign({ tab: proxyTabIndex, proxy: proxyTabs.length }, entry));
-                    proxyTabs.push(tab);
+                if (entry.sourceLabel) {
+                    var source = entrySource(entry, entry.sourceLabel);
+                    if (source) tab.content = [E('p', {}, source)].concat(tab.content);
+                }
+                tab = templates.panel(tab);
+                var group = groups[template.group];
+                var top = group ? group.index : tabs.length;
+                var index = group ? group.tabs.length : null;
+                if (entry.id === 'steer' || entry.id === 'adblock-fast') {
+                    var target = entry.id === 'steer' ? 'steer' : 'adblock';
+                    domainTargets[target] = function(match) {
+                        if (group) group.open(index);
+                        modules.select(top);
+                        if (tab.openSection) tab.openSection(target === 'steer' ? 'services' : match.list);
+                        return true;
+                    };
+                }
+                if (group) {
+                    rows.push(Object.assign({ tab: group.index, open: function() { group.open(index); } }, entry));
+                    group.tabs.push(tab);
                 } else {
                     rows.push(Object.assign({ tab: tabs.length }, entry));
                     tabs.push(tab);
                 }
             });
             registry.list.replaceChildren.apply(registry.list, rows.map(function(entry) {
+                if (entry.content) return entry.content;
                 var actions = [];
+                var template = moduleTemplates[entry.id] || {};
                 if (entry.tab != null) {
-                    var open = E('button', { class: 'cbi-button', type: 'button' }, _('Открыть'));
+                    var open = E('button', { class: 'cbi-button', type: 'button' },
+                        entry.installed === false && !template.releaseInstall ? _('Установить') : _('Открыть'));
                     open.addEventListener('click', function() {
-                        if (entry.proxy != null) openProxies(entry.proxy);
+                        if (entry.open) entry.open();
                         modules.select(entry.tab);
                     });
                     actions.push(open);
                 }
-                var link = entrySource(entry);
+                var link = entrySource(entry, entry.sourceLabel);
                 if (link) actions.push(link);
                 return E('section', { class: 'ows-overview' }, [
                     E('div', {}, [
                         E('h4', {}, entry.name),
                         E('p', {}, entry.kind === 'link' ? _('Сохранённая ссылка') :
-                            (entry.version ? _('Адаптер') + ' · ' + entry.version : entry.description))
+                            (entry.description || '') + (entry.installed === false ? ' · ' + _('Пакет не установлен') : ''))
                     ]),
                     E('div', { class: 'ows-actions ows-entry-actions' }, actions)
                 ]);
             }));
-            var active = modules ? modules.selectedId() : openNative ? 'zapret2' : 'overview';
+            var initial = window.location.hash === instructionsHash ? 'instructions' : zapret2Start ? 'zapret2' : 'overview';
+            var active = modules ? modules.selectedId() : initial;
             modules = createTabs(_('Модули OWS'), tabs, active, function(id) {
-                rememberNativeTab(id === 'zapret2' && zapret2.selectedId() === zapret2Module.native.id);
+                if (id === 'instructions') {
+                    if (window.location.hash !== instructionsHash) window.history.replaceState(window.history.state, '', instructionsHash);
+                    return;
+                }
+                rememberZapret2Tab(id === 'zapret2' ? zapret2.selectedId() : null);
             });
             workspace.replaceChildren(modules.content);
         }
 
-        renderModules([], {});
+        renderModules([], {}, {});
         registry.load();
         refresh();
         poll.add(function() { return refresh(false); }, 3);

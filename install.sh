@@ -20,15 +20,35 @@ upgrade_ready() {
         [ ! -f "$ticket" ] || fail 'Wait for OWS jobs to finish before upgrading'
     done
     [ ! -d /etc/ows/pending ] || fail 'Resolve pending Zapret2 recovery before upgrading'
+    [ ! -d /etc/ows/system.pending ] || fail 'Resolve pending system recovery before upgrading'
+    [ ! -d /etc/ows/system-handover.pending ] || fail 'Resolve pending system handover before upgrading'
+    [ ! -d /etc/ows/network-compat.pending ] || fail 'Resolve pending network handover before upgrading'
+    [ ! -d /etc/ows/adblock-live/pending ] || fail 'Resolve pending adblock recovery before upgrading'
+    [ ! -e /etc/ows/doh-live/takeover.pending ] && [ ! -d /etc/ows/doh-live/switch.pending ] ||
+        fail 'Resolve pending DoH recovery before upgrading'
 }
 
 file_list() {
     cat <<'FILES'
 adapters/zapret2.sh /usr/lib/ows/zapret2.sh 644
+adapters/system.sh /usr/lib/ows/system.sh 644
+adapters/system-handover.sh /usr/lib/ows/system-handover.sh 644
+adapters/network-compat.sh /usr/lib/ows/network-compat.sh 644
+adapters/network-handover.sh /usr/lib/ows/network-handover.sh 644
 adapters/zapret-module.sh /usr/lib/ows/zapret-module.sh 644
+adapters/packages.sh /usr/lib/ows/packages.sh 644
 adapters/zapret-constructor.sh /usr/lib/ows/zapret-constructor.sh 644
 adapters/zapret-presets.sh /usr/lib/ows/zapret-presets.sh 644
 adapters/dns.sh /usr/lib/ows/dns.sh 644
+adapters/doh.sh /usr/lib/ows/doh.sh 644
+adapters/doh-live.sh /usr/lib/ows/doh-live.sh 644
+adapters/doh-providers.txt /usr/lib/ows/doh-providers.txt 644
+adapters/snapshot.sh /usr/lib/ows/snapshot.sh 644
+adapters/adblock-migration.sh /usr/lib/ows/adblock-migration.sh 644
+adapters/adblock-policy.sh /usr/lib/ows/adblock-policy.sh 644
+adapters/adblock-update.sh /usr/lib/ows/adblock-update.sh 644
+adapters/adblock-live.sh /usr/lib/ows/adblock-live.sh 644
+adapters/adblock-storage.sh /usr/lib/ows/adblock-storage.sh 644
 adapters/stgws.sh /usr/lib/ows/stgws.sh 644
 adapters/netshift.sh /usr/lib/ows/netshift.sh 644
 adapters/tg-ws-proxy.sh /usr/lib/ows/tg-ws-proxy.sh 644
@@ -52,20 +72,42 @@ FILES
         cat <<'FILES'
 adapters/zapret2-editor.sh /usr/lib/ows/zapret2-editor.sh 644
 adapters/registry.sh /usr/lib/ows/registry.sh 644
+adapters/domain-search.sh /usr/lib/ows/domain-search.sh 644
+examples/steer.adapter.json /usr/lib/ows/steer.adapter.json 644
+examples/stgws.adapter.json /usr/lib/ows/stgws.adapter.json 644
+examples/netshift.adapter.json /usr/lib/ows/netshift.adapter.json 644
+examples/tg-ws-proxy.adapter.json /usr/lib/ows/tg-ws-proxy.adapter.json 644
+examples/adblock-fast.adapter.json /usr/lib/ows/adblock-fast.adapter.json 644
 openwrt/ows.rpc /usr/libexec/rpcd/ows 755
+openwrt/rpc-response.sh /usr/lib/ows/rpc-response.sh 644
 luci/acl.json /usr/share/rpcd/acl.d/luci-app-ows.json 644
 luci/menu.json /usr/share/luci/menu.d/luci-app-ows.json 644
 luci/ows.js /www/luci-static/resources/view/ows-services.js 644
 luci/ows-stgws.js /www/luci-static/resources/view/ows-stgws.js 644
 luci/ows-service.js /www/luci-static/resources/view/ows-service.js 644
+luci/ows-system-templates.js /www/luci-static/resources/view/ows-system-templates.js 644
 luci/ows-templates.js /www/luci-static/resources/view/ows-templates.js 644
 luci/ows-template-overrides.js /www/luci-static/resources/view/ows-template-overrides.js keep
 luci/ows-vpn.js /www/luci-static/resources/view/ows-vpn-panel.js 644
 luci/ows-vpn-editor.js /www/luci-static/resources/view/ows-vpn-editor.js 644
 luci/ows-zapret.js /www/luci-static/resources/view/ows-zapret.js 644
 luci/ows-zapret-tools.js /www/luci-static/resources/view/ows-zapret-tools.js 644
+luci/ows-zapret-tactics.js /www/luci-static/resources/view/ows-zapret-tactics.js 644
 luci/ows-dns.js /www/luci-static/resources/view/ows-dns.js 644
+luci/ows-ui.js /www/luci-static/resources/view/ows-ui.js 644
+luci/ows-instructions.js /www/luci-static/resources/view/ows-instructions.js 644
+luci/ows-markdown.js /www/luci-static/resources/view/ows-markdown.js 644
+adapters/instructions.sh /usr/lib/ows/instructions.sh 644
+adapters/instructions-legacy.sh /usr/lib/ows/instructions-legacy.sh 755
+Docs/instructions/zapret2.md /usr/lib/ows/instructions-zapret2.md 644
+Docs/instructions/lua.md /usr/lib/ows/instructions-lua.md 644
+Docs/instructions/profiles.md /usr/lib/ows/instructions-profiles.md 644
+Docs/instructions/openwrt.md /usr/lib/ows/instructions-openwrt.md 644
+Docs/instructions/tspu-classification.md /usr/lib/ows/instructions-tspu-classification.md 644
+luci/ows-doh.js /www/luci-static/resources/view/ows-doh.js 644
+luci/ows-domain-search.js /www/luci-static/resources/view/ows-domain-search.js 644
 luci/ows-native.js /www/luci-static/resources/view/ows-native.js 644
+luci/ows-native-zapret2.js /www/luci-static/resources/view/ows-native-zapret2.js 644
 luci/ows.css /www/luci-static/resources/view/ows-services.css 644
 luci/menu-zapret2.json /usr/share/luci/menu.d/zz-luci-app-ows-zapret2.json 644
 FILES
@@ -132,6 +174,18 @@ atomic_copy() (
         cp "$source" "$temp" && chmod "$mode" "$temp" || exit 1
     fi
     mv -f "$temp" "$path"
+)
+
+archive_upgrade() (
+    local archive="$backup.tar.gz" temp
+    case "$backup" in /root/ows-upgrade.??????) ;; *) exit 1 ;; esac
+    [ ! -e "$archive" ] && [ ! -L "$archive" ] || exit 1
+    temp=$(mktemp "$archive.XXXXXX") || exit 1
+    trap 'rm -f "$temp"' EXIT
+    tar -czf "$temp" -C /root "${backup##*/}" && gzip -t "$temp" && mv "$temp" "$archive" || exit 1
+    sync || exit 1
+    rm -r "$backup" || echo "Unpacked backup still present: $backup" >&2
+    printf '%s\n' "$archive"
 )
 
 activate_rpc() {
@@ -218,6 +272,7 @@ if [ "$was_running" = 1 ] || [ "$upgrade" = 0 ]; then
 fi
 trap - EXIT HUP INT TERM
 if [ "$upgrade" = 1 ]; then
+    if archived=$(archive_upgrade); then backup=$archived; fi
     echo "OWS upgraded. Backup: $backup"
 else
     rm -f "$touched"

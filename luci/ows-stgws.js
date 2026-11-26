@@ -1,10 +1,10 @@
 'use strict';
 'require baseclass';
 'require rpc';
+'require view.ows-ui as owsUI';
 
 var info = rpc.declare({ object: 'ows', method: 'stgws_info' });
 var execute = rpc.declare({ object: 'ows', method: 'stgws_action', params: ['action'] });
-var output = rpc.declare({ object: 'ows', method: 'job_output', params: ['job'] });
 
 return baseclass.extend({
     tab: function(entry, createTabs, follow) {
@@ -12,44 +12,22 @@ return baseclass.extend({
         var routes = E('div');
         var automation = E('div');
         var packages = E('div');
-        var notice = E('p', { 'aria-live': 'polite' });
-        var log = E('pre', { hidden: '' });
-        var current = '';
+        var feedback = owsUI.feedback();
+        var busy = false;
         var refresh = E('button', { type: 'button', class: 'cbi-button' }, _('Обновить'));
 
-        function button(label, handler, disabled) {
-            var element = E('button', { class: 'cbi-button', type: 'button' }, label);
-            element.disabled = !!disabled;
-            element.addEventListener('click', handler);
-            return element;
-        }
+        var button = owsUI.button;
 
         function submit(action, confirmText) {
-            if (current || (confirmText && !window.confirm(confirmText))) return;
-            current = 'submitting';
-            notice.textContent = _('Ставим операцию в очередь');
-            log.hidden = true;
-            execute(action).then(function(result) {
-                notice.textContent = result.error || '';
-                if (!result.job) { current = ''; return; }
-                current = result.job;
-                follow(result.job, function(state) {
-                    if (current !== state.job || ['queued', 'applying'].indexOf(state.phase) >= 0) return;
-                    current = '';
-                    notice.textContent = state.phase === 'done' ? _('Операция завершена') : _('Операция завершилась с ошибкой');
-                    output(state.job).then(function(result) {
-                        if (current) return;
-                        log.textContent = result.output || '';
-                        log.hidden = !log.textContent;
-                    }, function() {
-                        notice.textContent = _('Не удалось прочитать журнал операции');
-                    });
-                    load();
-                });
-            }, function() {
-                current = '';
-                notice.textContent = _('Запрос отклонён. Проверьте права управления sTGWS.');
-            });
+            if (busy || (confirmText && !window.confirm(confirmText))) return;
+            busy = true;
+            feedback.start(_('Ставим операцию в очередь'));
+            return owsUI.job(execute(action), follow, true).then(function(result) {
+                owsUI.showResult(feedback, result);
+                return load();
+            }).catch(function(error) {
+                feedback.show(error.message || _('Запрос отклонён. Проверьте права управления sTGWS.'));
+            }).finally(function() { busy = false; });
         }
 
         function action(label, name, disabled, confirmText) {
@@ -60,27 +38,18 @@ return baseclass.extend({
             var installed = data.installed;
             service.replaceChildren(
                 E('p', {}, !installed ? _('Служба не установлена') : data.running ? _('Мост запущен') : _('Мост остановлен')),
-                E('dl', {}, [
-                    E('dt', {}, _('Версия пакета')), E('dd', {}, data.version || '—'),
-                    E('dt', {}, _('Основной домен')), E('dd', {}, data.domain || '—'),
-                    E('dt', {}, _('Запуск при загрузке')), E('dd', {}, data.enabled ? _('Включён') : _('Выключен'))
-                ]),
+                E('dl', {}, owsUI.details([
+                    [_('Версия пакета'), data.version], [_('Основной домен'), data.domain],
+                    [_('Запуск при загрузке'), data.enabled ? _('Включён') : _('Выключен')]
+                ])),
                 E('div', { class: 'ows-actions' }, action(_('Перезапустить'), 'restart', !installed,
                     _('Перезапустить sTGWS? Активные соединения переподключатся.')))
             );
             var rows = (data.routes || []).map(function(route) {
-                return E('tr', { class: 'tr' }, [
-                    E('td', { class: 'td' }, route.dc),
-                    E('td', { class: 'td' }, route.mode),
-                    E('td', { class: 'td' }, route.front || '—')
-                ]);
+                return [route.dc, route.mode, route.front || '—'];
             });
             routes.replaceChildren(
-                rows.length ? E('table', { class: 'table' }, [
-                    E('thead', {}, E('tr', { class: 'tr table-titles' }, [_('ДЦ'), _('Режим'), _('Фронт')].map(function(text) {
-                        return E('th', { class: 'th', scope: 'col' }, text);
-                    }))), E('tbody', {}, rows)
-                ]) : E('p', {}, _('Карта маршрутов пуста')),
+                rows.length ? owsUI.table([_('ДЦ'), _('Режим'), _('Фронт')], rows) : E('p', {}, _('Карта маршрутов пуста')),
                 E('div', { class: 'ows-actions' }, [
                     action(_('Проверить MTProto'), 'check', !installed),
                     action(_('Подобрать домен'), 'reconfigure', !installed, _('Запустить подбор домена sTGWS?')),
@@ -106,9 +75,9 @@ return baseclass.extend({
             );
             packages.replaceChildren(
                 E('p', {}, data.available ? _('Версии в репозиториях') + ' · ' + data.available
-                    : _('В настроенных репозиториях нет пакета tgws')),
+                    : _('Пакет tgws не найден в локальном индексе. Можно попробовать установку из репозитория или открыть инструкцию sTGWS.')),
                 E('div', { class: 'ows-actions' }, [
-                    action(_('Установить'), 'install', installed || !data.available, _('Установить tgws из настроенного репозитория?')),
+                    action(_('Установить'), 'install', installed || !data.manager, _('Установить tgws из настроенного репозитория?')),
                     action(_('Обновить'), 'update', !installed || !data.available, _('Обновить пакет tgws?')),
                     action(_('Переустановить'), 'reinstall', !installed || !data.available, _('Переустановить пакет tgws?')),
                     action(_('Удалить пакет'), 'remove', !installed || !data.manager, _('Удалить пакет tgws? Мост перестанет обслуживать соединения.'))
@@ -125,10 +94,10 @@ return baseclass.extend({
         function load() {
             refresh.disabled = true;
             return info().then(function(data) {
-                if (data.error) notice.textContent = data.error;
+                if (data.error) feedback.show(data.error);
                 else render(data);
             }, function() {
-                notice.textContent = _('Не удалось прочитать состояние sTGWS');
+                feedback.show(_('Не удалось прочитать состояние sTGWS'));
             }).finally(function() { refresh.disabled = false; });
         }
 
@@ -138,12 +107,12 @@ return baseclass.extend({
             { id: 'stgws-routes', label: _('Маршруты'), content: routes },
             { id: 'stgws-auto', label: _('Автоматизация'), content: automation },
             { id: 'stgws-package', label: _('Пакет'), content: packages }
-        ]);
+        ], entry.installed === false ? 'stgws-package' : 'stgws-service');
         return {
             id: 'module-stgws', label: entry.name, activate: load,
             content: [
                 E('div', { class: 'ows-module-heading' }, [E('h3', {}, entry.name), refresh]),
-                tabs.content, notice, log
+                tabs.content, feedback.content
             ]
         };
     }

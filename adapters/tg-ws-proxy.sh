@@ -15,7 +15,12 @@ tgws_proxy_info() (
         "$TGWS_PROXY_INIT" enabled >/dev/null 2>&1 && enabled=1
         tgws_proxy_running && running=1
     fi
-    version=$(opkg status tg-ws-proxy 2>/dev/null | awk '/^Version: / {print $2; exit}')
+    if command -v apk >/dev/null; then
+        version=$(apk list --installed tg-ws-proxy 2>/dev/null |
+            awk -v prefix=tg-ws-proxy- 'index($1,prefix)==1 {print substr($1,length(prefix)+1); exit}')
+    else
+        version=$(opkg status tg-ws-proxy 2>/dev/null | awk '/^Version: / {print $2; exit}')
+    fi
     port=$(awk -F= '$1 == "PORT" {print $2}' /etc/tg-ws-proxy/config.conf 2>/dev/null |
         tr -d "'\"\r" | awk '/^[0-9]+$/ && $0 > 0 && $0 <= 65535 {port=$0+0} END {if (port) print port}')
     json_init

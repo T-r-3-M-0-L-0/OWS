@@ -67,17 +67,16 @@ stgws_package() {
     local action=$1 manager
     manager=$(stgws_package_manager)
     [ -n "$manager" ] || { echo 'Менеджер пакетов недоступен'; return 1; }
-    if [ "$action" != remove ] && [ -z "$(stgws_versions "$manager")" ]; then
+    if [ "$action" != install ] && [ "$action" != remove ] && [ -z "$(stgws_versions "$manager")" ]; then
         echo 'В настроенных репозиториях OpenWrt пакет tgws недоступен'
         return 1
     fi
     stgws_backup || return 1
     case "$manager:$action" in
-        apk:install) apk add tgws ;;
+        apk:install|opkg:install) . /usr/lib/ows/packages.sh; ows_install_repo_packages tgws ;;
         apk:update) apk upgrade tgws ;;
         apk:reinstall) apk fix --reinstall tgws ;;
         apk:remove) apk del tgws ;;
-        opkg:install) opkg install tgws ;;
         opkg:update) opkg upgrade tgws ;;
         opkg:reinstall) opkg --force-reinstall install tgws ;;
         opkg:remove) opkg remove tgws ;;

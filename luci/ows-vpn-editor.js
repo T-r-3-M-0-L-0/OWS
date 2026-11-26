@@ -1,6 +1,9 @@
 'use strict';
 'require baseclass';
 'require rpc';
+'require view.ows-ui as owsUI';
+
+var field = owsUI.field, button = owsUI.button;
 
 var read = rpc.declare({ object: 'ows', method: 'vpn_editor', params: ['id'] });
 var readNodes = rpc.declare({ object: 'ows', method: 'vpn_nodes', params: ['id', 'target'] });
@@ -9,23 +12,12 @@ var action = rpc.declare({ object: 'ows', method: 'vpn_action', params: ['id', '
 var output = rpc.declare({ object: 'ows', method: 'job_output', params: ['job'] });
 var listPage = rpc.declare({ object: 'ows', method: 'vpn_list_page', params: ['job', 'kind', 'page', 'search'] });
 
-function field(label, control) {
-    return E('label', { class: 'ows-field' }, [E('span', {}, label), control]);
-}
-
 function dropdown(options, initial) {
     var select = E('select', { class: 'cbi-input-select' }, options.map(function(item) {
         return E('option', { value: item[0] }, item[1]);
     }));
     if (initial != null) select.value = String(initial);
     return select;
-}
-
-function button(label, callback, disabled) {
-    var node = E('button', { type: 'button', class: 'cbi-button' }, label);
-    node.disabled = !!disabled;
-    node.addEventListener('click', callback);
-    return node;
 }
 
 function numeric(label, value) {

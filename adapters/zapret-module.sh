@@ -180,7 +180,7 @@ zapret_module_install() (
 zapret_module_action_allowed() {
     zapret_module_valid "$1" || return 1
     case "$2" in
-        download|install|start|stop|restart|enable|disable) return 0 ;;
+        download|install|install-latest|start|stop|restart|enable|disable) return 0 ;;
     esac
     [ "$1" = zapret2 ] && zapret_constructor_allowed "$2"
 }
@@ -194,6 +194,10 @@ zapret_module_execute() {
     case "$command" in
         download) zapret_module_download "$id" ;;
         install) zapret_module_install "$id" ;;
+        install-latest)
+            [ ! -x "$init" ] || { echo 'Служба уже установлена'; return 1; }
+            zapret_module_check_other "$id" && zapret_module_download "$id" && zapret_module_install "$id"
+            ;;
         start|restart|enable|stop|disable)
             [ -x "$init" ] || { echo 'Служба не установлена'; return 1; }
             case "$command" in start|restart|enable) zapret_module_check_other "$id" || return 1 ;; esac

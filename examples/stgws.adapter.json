@@ -4,6 +4,7 @@
   "name": "sTGWS",
   "version": "0.1.0",
   "service": "tgws",
-  "category": "proxy",
+  "category": "telegram-proxy",
+  "source": "https://gitlab.com/xyzmean/brb",
   "description": "Состояние установленной службы sTGWS."
 }
