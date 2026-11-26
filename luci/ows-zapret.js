@@ -79,7 +79,7 @@ return baseclass.extend({
                         busy = false;
                         refresh();
                         if (constructorOpened) refreshConstructor();
-                        if (finalState.phase === 'done' && /^builder-(create|apply)$/.test(name) && profiles.onApplied)
+                        if (finalState.phase === 'done' && ['import-resources','builder-create','builder-apply'].includes(name) && profiles.onApplied)
                             profiles.onApplied();
                     });
                 });
@@ -126,6 +126,9 @@ return baseclass.extend({
                                 !data.reference_mismatch && data.format && (data.downloaded || data.arch),
                                 _('Установить пакет штатного интерфейса LuCI?')) : '',
                         control(_('Скачать пакеты'), 'download', data.arch && data.format && packageSupported),
+                        data.id === 'zapret2' && data.installed && !data.reference_mismatch ?
+                            control(_('Импортировать стратегии и ресурсы'), 'import-resources', true,
+                                _('Добавить отсутствующие стратегии, пресеты, Lua и blob-файлы и заполнить пустые штатные списки?')) : '',
                         data.installed ? control(_('Запустить'), 'start', !data.running && !data.conflict) : '',
                         data.installed ? control(_('Остановить'), 'stop', data.running,
                             _('Остановить рабочую службу?')) : '',

@@ -249,7 +249,7 @@ zapret_module_action_allowed() {
     case "$2" in
         download|install|install-latest|start|stop|restart|enable|disable) return 0 ;;
     esac
-    [ "$1" = zapret2 ] && zapret_constructor_allowed "$2"
+    [ "$1" = zapret2 ] && { [ "$2" = import-resources ] || zapret_constructor_allowed "$2"; }
 }
 
 zapret_module_execute() {
@@ -261,6 +261,15 @@ zapret_module_execute() {
     case "$command" in
         download) zapret_module_download "$id" ;;
         install) zapret_module_install "$id" ;;
+        import-resources)
+            (
+                . "$LIB/zapret2-reference.sh"
+                [ -x "$init" ] && [ "$(zapret_module_version "$id" "$(zapret_module_manager || :)")" = "$OWS_ZAPRET2_VERSION" ] ||
+                    { echo 'Для импорта нужен совместимый движок Zapret2 Routerich'; exit 1; }
+                lock_zapret2 || { echo 'Дождитесь завершения проверки Zapret2'; exit 1; }
+                zapret2_reference_defaults merge
+            )
+            ;;
         install-latest)
             if [ -x "$init" ]; then
                 if [ "$id" = zapret2 ]; then

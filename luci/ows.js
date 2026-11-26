@@ -76,6 +76,7 @@ function statusLabel(result, template) {
         var parts = (result.action || '').split(':');
         var operation = {
             download:_('Скачивание пакетов'), install:_('Установка пакетов'), 'install-latest':_('Установка пакетов'),
+            'import-resources':_('Импорт стратегий и ресурсов'),
             start:_('Запуск'), stop:_('Остановка'), restart:_('Перезапуск'),
             enable:_('Включение автозапуска'), disable:_('Выключение автозапуска'),
             'compare-start':_('Сравнение стратегий'), 'compare-stop':_('Остановка сравнения'),

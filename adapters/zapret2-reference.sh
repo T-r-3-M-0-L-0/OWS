@@ -61,35 +61,81 @@ zapret2_reference_luci() {
         /etc/init.d/rpcd reload
 }
 
+zapret2_reference_resources() {
+    local prefix=$1 directory=$2 file name target
+    [ ! -L "$directory" ] && mkdir -p "$directory" || return 1
+    for file in "$LIB"/"$prefix"*; do
+        name=${file##*/}
+        target=$directory/${name#"$prefix"}
+        [ ! -L "$target" ] || return 1
+        if [ -f "$target" ] && [ -s "$target" ]; then continue; fi
+        [ ! -e "$target" ] || [ -f "$target" ] || return 1
+        zapret2_reference_copy "$file" "$target" || return 1
+    done
+}
+
 zapret2_reference_defaults() (
-    local file target candidate
+    local mode=${1:-fresh} file target candidate
     . "$LIB/zapret2.sh"
+    [ -f "$CONFIG" ] && [ ! -L "$CONFIG" ] || { echo 'Конфигурация Zapret2 отсутствует'; exit 1; }
+    zapret2_no_pending_changes ||
+        { echo 'Сохраните или сбросьте черновик Zapret2 в LuCI или UCI.'; exit 1; }
     candidate=$(mktemp -d "$RUN/.zapret2-defaults.XXXXXX") || exit 1
     trap 'rm -rf "$candidate"' EXIT
-    zapret2_no_pending_changes || exit 1
     cp -p "$CONFIG" "$candidate/previous" || exit 1
-    awk '/^config[[:space:]]+/ { keep=($2=="zapret2") } keep' "$CONFIG" > "$candidate/candidate" &&
-        cat "$LIB/zapret2-default-profiles.uci" >> "$candidate/candidate" || exit 1
-    mkdir -p /etc/zapret2-presets /opt/zapret2/ipset || exit 1
-    for file in "$LIB"/zapret2-list-*.txt; do
-        target=/opt/zapret2/ipset/${file##*zapret2-list-}
-        [ -f "$target" ] || zapret2_reference_copy "$file" "$target" || exit 1
-    done
+    case "$mode" in
+        fresh)
+            awk '/^config[[:space:]]+/ { keep=($2=="zapret2") } keep' "$candidate/previous" > "$candidate/candidate" &&
+                cat "$LIB/zapret2-default-profiles.uci" >> "$candidate/candidate" || exit 1
+            ;;
+        merge)
+            mkdir "$candidate/uci" "$candidate/override" "$candidate/delta" || exit 1
+            cp "$candidate/previous" "$candidate/uci/zapret2" || exit 1
+            uci -q -c "$candidate/uci" -C "$candidate/override" -t "$candidate/delta" show zapret2 > "$candidate/sections" || exit 1
+            grep -Fxq 'zapret2.main=zapret2' "$candidate/sections" ||
+                { echo 'Конфигурация не поддерживает формат Routerich'; exit 1; }
+            cp -p "$candidate/previous" "$candidate/candidate" || exit 1
+            awk -F= '
+                FNR==NR {
+                    if ($1 ~ /^zapret2[.][A-Za-z0-9_]+$/) { sub(/^zapret2[.]/,"",$1); existing[$1]=$2 }
+                    next
+                }
+                /^config[[:space:]]+/ {
+                    split($0, fields, /[[:space:]]+/)
+                    id=fields[3]; gsub(/\047/, "", id)
+                    if (id in existing && existing[id]!=fields[2]) {
+                        printf "Несовместимый тип секции Zapret2: %s\n", id > "/dev/stderr"
+                        exit 1
+                    }
+                    keep=!(id in existing)
+                    if (keep) print ""
+                }
+                keep { print }
+            ' "$candidate/sections" "$LIB/zapret2-default-profiles.uci" >> "$candidate/candidate" || exit 1
+            ;;
+        *) exit 1 ;;
+    esac
+    [ ! -L /opt/zapret2 ] && [ ! -L /opt/zapret2/files ] || exit 1
+    zapret2_reference_resources zapret2-list- /opt/zapret2/ipset &&
+        zapret2_reference_resources zapret2-lua- /opt/zapret2/lua &&
+        zapret2_reference_resources zapret2-blob- /opt/zapret2/files/fake || exit 1
     for file in zapret_hosts_auto.txt zapret_hosts_user.txt zapret_hosts_user_exclude.txt \
         list-general-user.txt list-exclude-user.txt ipset-exclude-user.txt; do
         target=/opt/zapret2/ipset/$file
         [ ! -L "$target" ] || exit 1
         [ -f "$target" ] || (umask 022; set -C; : > "$target") || exit 1
     done
-    target=/opt/zapret2/lua/zapret-testlib.lua
-    [ -f "$target" ] || zapret2_reference_copy "$LIB/zapret2-default-zapret-testlib.lua" "$target" || exit 1
-    target=/opt/zapret2/files/fake/tls_clienthello_www_sferum_ru.bin
-    [ -f "$target" ] || zapret2_reference_copy "$LIB/zapret2-default-tls_clienthello_www_sferum_ru.bin" "$target" || exit 1
     validate_config "$candidate" || exit 1
-    cmp -s "$CONFIG" "$candidate/previous" && write_config "$candidate/candidate" || exit 1
+    cmp -s "$CONFIG" "$candidate/previous" && zapret2_no_pending_changes ||
+        { echo 'Конфигурация Zapret2 изменилась во время импорта'; exit 1; }
+    if ! cmp -s "$CONFIG" "$candidate/candidate"; then
+        write_config "$candidate/candidate" || exit 1
+    fi
+    [ ! -L /etc/zapret2-presets ] && mkdir -p /etc/zapret2-presets || exit 1
     for file in "$LIB"/zapret2-preset-*.txt; do
         target=/etc/zapret2-presets/${file##*zapret2-preset-}
+        [ ! -L "$target" ] || exit 1
         [ -f "$target" ] || zapret2_reference_copy "$file" "$target" || exit 1
     done
-    echo 'Подготовлены пресеты Zapret2. Все стратегии выключены до выбора пользователя.'
+    echo 'Стратегии, списки, Lua, blob-файлы и пресеты импортированы. Новые стратегии выключены.'
 )

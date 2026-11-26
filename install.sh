@@ -41,8 +41,6 @@ adapters/zapret-module.sh /usr/lib/ows/zapret-module.sh 644
 adapters/zapret2-reference.sh /usr/lib/ows/zapret2-reference.sh 644
 modules/zapret2/zapret2-safe.sh /usr/lib/ows/zapret2-safe.sh 755
 modules/zapret2/defaults/profiles.uci /usr/lib/ows/zapret2-default-profiles.uci 644
-modules/zapret2/defaults/zapret-testlib.lua /usr/lib/ows/zapret2-default-zapret-testlib.lua 644
-modules/zapret2/defaults/tls_clienthello_www_sferum_ru.bin /usr/lib/ows/zapret2-default-tls_clienthello_www_sferum_ru.bin 644
 modules/zapret2/tools/tspu-test /usr/lib/ows/tspu-test 755
 modules/zapret2/tools/TSPU-CLASS-TEST-LICENSE /usr/lib/ows/TSPU-CLASS-TEST-LICENSE 644
 adapters/packages.sh /usr/lib/ows/packages.sh 644
@@ -85,6 +83,12 @@ FILES
     done
     for asset in "$SRC"/modules/zapret2/defaults/lists/*.txt; do
         printf 'modules/zapret2/defaults/lists/%s /usr/lib/ows/zapret2-list-%s 644\n' "${asset##*/}" "${asset##*/}"
+    done
+    for asset in "$SRC"/modules/zapret2/defaults/lua/*.lua; do
+        printf 'modules/zapret2/defaults/lua/%s /usr/lib/ows/zapret2-lua-%s 644\n' "${asset##*/}" "${asset##*/}"
+    done
+    for asset in "$SRC"/modules/zapret2/defaults/blobs/*.bin; do
+        printf 'modules/zapret2/defaults/blobs/%s /usr/lib/ows/zapret2-blob-%s 644\n' "${asset##*/}" "${asset##*/}"
     done
     for asset in "$SRC"/modules/zapret2/defaults/presets/*.txt; do
         printf 'modules/zapret2/defaults/presets/%s /usr/lib/ows/zapret2-preset-%s 644\n' "${asset##*/}" "${asset##*/}"

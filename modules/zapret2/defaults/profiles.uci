@@ -49,6 +49,12 @@ config list 'list_list_exclude_user'
 config list 'list_list_google'
 	option path '/opt/zapret2/ipset/list-google.txt'
 
+config list 'list_hosts_youtube_googlevideo'
+	option path '/opt/zapret2/ipset/zapret_hosts_youtube_googlevideo.txt'
+
+config list 'list_hosts_list_googlevideo'
+	option path '/opt/zapret2/ipset/zapret_hosts_list_googlevideo.txt'
+
 config blob 'blob_dht_find_node'
 	option path '/opt/zapret2/files/fake/dht_find_node.bin'
 	option enabled '0'
@@ -273,6 +279,14 @@ config blob 'blob_ACTIVE_GAME_UDP'
 	option path '/opt/zapret2/files/fake/ACTIVE_GAME_UDP.bin'
 	option enabled '0'
 
+config blob 'blob_tls_clienthello_www_sferum_ru'
+	option path '/opt/zapret2/files/fake/tls_clienthello_www_sferum_ru.bin'
+	option enabled '1'
+
+config blob 'blob_quic_initial_wardogs_esk_4pda'
+	option path '/opt/zapret2/files/fake/quic_initial_wardogs_esk_4pda.bin'
+	option enabled '0'
+
 config luascript 'lua_zapret_obfs'
 	option path '/opt/zapret2/lua/zapret-obfs.lua'
 	option enabled '0'
@@ -292,13 +306,6 @@ config luascript 'lua_zapret_wgobfs'
 config luascript 'lua_zapret_testlib'
 	option path '/opt/zapret2/lua/zapret-testlib.lua'
 	option enabled '0'
-
-config blob 'blob_tls_clienthello_www_sferum_ru'
-	option path '/opt/zapret2/files/fake/tls_clienthello_www_sferum_ru.bin'
-	option enabled '1'
-
-config list 'list_hosts_youtube_googlevideo'
-	option path '/opt/zapret2/ipset/zapret_hosts_youtube_googlevideo.txt'
 
 config strategy 'discord_media'
 	option enabled '0'
@@ -777,10 +784,10 @@ config strategy 'Yv11'
 config strategy 'YouTube_Googlevideo_TCP443'
 	option enabled '0'
 	option port '443'
-	option protocol 'tcp'
-	option filter_l3 'ipv4'
-	option filter_l7 'tls'
-	option hostlist 'list_hosts_youtube_googlevideo'
+	list protocol 'tcp'
+	list filter_l3 'ipv4'
+	list filter_l7 'tls'
+	list hostlist 'list_hosts_youtube_googlevideo'
 	option script '--payload=tls_client_hello
 --lua-desync=hostfakesplit:host=google.com:tcp_ts=-600000'
 
