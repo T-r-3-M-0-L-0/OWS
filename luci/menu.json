@@ -12,6 +12,27 @@
       "fs": { "/www/luci-static/resources/view/zapret2/loader.js": "file" }
     }
   },
+  "admin/services/ows-native-zapret2-settings": {
+    "action": { "type": "view", "path": "zapret2/settings" },
+    "depends": {
+      "acl": ["luci-app-zapret2"],
+      "fs": { "/www/luci-static/resources/view/zapret2/settings.js": "file" }
+    }
+  },
+  "admin/services/ows-native-zapret2-service": {
+    "action": { "type": "view", "path": "zapret2/service" },
+    "depends": {
+      "acl": ["luci-app-zapret2"],
+      "fs": { "/www/luci-static/resources/view/zapret2/service.js": "file" }
+    }
+  },
+  "admin/services/ows-native-zapret2-dmnlog": {
+    "action": { "type": "view", "path": "zapret2/dmnlog" },
+    "depends": {
+      "acl": ["luci-app-zapret2"],
+      "fs": { "/www/luci-static/resources/view/zapret2/dmnlog.js": "file" }
+    }
+  },
   "admin/services/ows-native-zapret": {
     "action": { "type": "view", "path": "zapret/settings" },
     "depends": {

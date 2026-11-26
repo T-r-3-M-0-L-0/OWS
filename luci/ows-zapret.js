@@ -40,11 +40,19 @@ return baseclass.extend({
             acl: 'luci-app-' + id,
             revision: profiles.revision,
             onLoad: profiles.onNativeLoad,
+            pages: function(nativeView) {
+                if (nativeView !== 'view.zapret2.settings') return null;
+                return [
+                    {label:_('Настройки'), route:'ows-native-zapret2-settings'},
+                    {label:_('Служба'), route:'ows-native-zapret2-service'},
+                    {label:_('Журнал доменов'), route:'ows-native-zapret2-dmnlog'}
+                ];
+            },
             available: function() {
                 return info(id).then(function(data) {
                     if (!data || data.error || data.id !== id)
                         throw new Error(_('Не удалось прочитать состояние пакета LuCI.'));
-                    return !!data.native_view;
+                    return data.native_view;
                 });
             }
         });
@@ -88,6 +96,7 @@ return baseclass.extend({
         function refresh() {
             return info(id).then(function(data) {
                 if (!data || data.error || data.id !== id) throw new Error();
+                var installAction = data.downloaded ? 'install' : 'install-latest';
                 panel.replaceChildren(
                     E('p', {}, [
                         data.installed ? _('Установлен') + (data.version ? ' · ' + data.version : '') : _('Служба не установлена'),
@@ -99,11 +108,16 @@ return baseclass.extend({
                             data.repository), data.arch ? ' · ' + data.arch : '', data.format ? ' · ' + data.format : '',
                         data.downloaded ? ' · ' + _('Скачан релиз') + ' ' + data.downloaded : ''
                     ]),
+                    E('p', {}, data.native_view ? _('Штатный интерфейс LuCI доступен') :
+                        _('Штатный интерфейс LuCI не найден')),
                     data.conflict ? E('p', {}, _('Другой движок запущен или включён в автозапуск') + ' · ' + data.conflict) : '',
                     actions([
-                        !data.installed ? control(_('Установить'), data.downloaded ? 'install' : 'install-latest',
+                        !data.installed ? control(_('Установить'), installAction,
                             data.arch && data.format && !data.conflict,
                             _('Установить движок и штатный интерфейс LuCI?')) : '',
+                        data.installed && !data.native_view ?
+                            control(_('Установить штатный интерфейс'), installAction, data.format && (data.downloaded || data.arch),
+                                _('Установить пакет штатного интерфейса LuCI?')) : '',
                         control(_('Скачать пакеты'), 'download', data.arch && data.format),
                         data.installed ? control(_('Запустить'), 'start', !data.running && !data.conflict) : '',
                         data.installed ? control(_('Остановить'), 'stop', data.running,

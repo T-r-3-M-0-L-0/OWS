@@ -30,6 +30,23 @@ zapret_module_repo() {
     esac
 }
 
+zapret_module_native_view() {
+    local dir=/www/luci-static/resources/view/$1
+    case "$1" in
+        zapret2)
+            if [ -r "$dir/loader.js" ]; then
+                echo view.zapret2.loader
+            elif [ -r "$dir/settings.js" ] && [ -r "$dir/service.js" ] && [ -r "$dir/dmnlog.js" ]; then
+                echo view.zapret2.settings
+            else return 1; fi
+            ;;
+        zapret)
+            [ -r "$dir/settings.js" ] && echo view.zapret.settings
+            ;;
+        *) return 1 ;;
+    esac
+}
+
 zapret_module_info() (
     . /usr/share/libubox/jshn.sh
     id=$1
@@ -56,13 +73,12 @@ zapret_module_info() (
     if zapret_module_running "$other" || { [ -x "/etc/init.d/$other" ] && "/etc/init.d/$other" enabled >/dev/null 2>&1; }; then
         json_add_string conflict "$other"
     fi
-    if [ -r "$prepared/version" ] && [ -s "$prepared/core.$format" ] && [ -s "$prepared/luci.$format" ]; then
+    if [ -r "$prepared/version" ] && [ -s "$prepared/luci.$format" ] &&
+        { [ -x "$init" ] || [ -s "$prepared/core.$format" ]; }; then
         json_add_string downloaded "$(cat "$prepared/version")"
     fi
-    if [ "$id" = zapret2 ] && [ -r /www/luci-static/resources/view/zapret2/loader.js ]; then
-        json_add_string native_view view.zapret2.loader
-    elif [ "$id" = zapret ] && [ -r /www/luci-static/resources/view/zapret/settings.js ]; then
-        json_add_string native_view view.zapret.settings
+    if native_view=$(zapret_module_native_view "$id"); then
+        json_add_string native_view "$native_view"
     fi
     json_dump
 )
@@ -75,8 +91,9 @@ zapret_module_fetch() {
         https://github.com/Dushnilin/zapret2-openwrt/releases/download/*) ;;
         *) return 1 ;;
     esac
-    timeout 70 curl -fsSL --proto '=https' --proto-redir '=https' --connect-timeout 8 \
-        --max-time 60 --max-filesize 25165824 -o "$2" "$1" &&
+    timeout -k 2 1215 curl -fsSL --proto '=https' --proto-redir '=https' --connect-timeout 8 \
+        --max-time 600 --speed-limit 1 --speed-time 45 --retry 1 --retry-max-time 605 \
+        --max-filesize 25165824 -o "$2" "$1" &&
         [ -s "$2" ] && [ "$(wc -c < "$2")" -le 25165824 ]
 }
 
@@ -92,7 +109,7 @@ zapret_module_asset() {
         select((explode - ("0123456789abcdef" | explode)) == [])
     ') ||
         { echo 'В публикации пакета отсутствует SHA-256'; return 1; }
-    zapret_module_fetch "$url" "$dest" || return 1
+    zapret_module_fetch "$url" "$dest" || { echo "Не удалось скачать $name"; return 1; }
     printf '%s  %s\n' "$digest" "$dest" | sha256sum -c -
 }
 
@@ -110,6 +127,7 @@ zapret_module_archive_file() {
 zapret_module_download() (
     umask 077
     id=$1
+    scope=${2:-all}
     format=$(zapret_module_manager) && arch=$(zapret_module_arch) && repo=$(zapret_module_repo "$id") ||
         { echo 'Не удалось определить формат пакета или архитектуру OpenWrt'; exit 1; }
     for cmd in curl jq timeout sha256sum; do
@@ -125,23 +143,31 @@ zapret_module_download() (
     mkdir -p "$RUN/packages"
     work=$(mktemp -d "$RUN/packages/.release.XXXXXX") || exit 1
     trap 'rm -rf "$work"' EXIT
-    zapret_module_fetch "https://api.github.com/repos/$repo/releases/latest" "$work/release.json" || exit 1
+    zapret_module_fetch "https://api.github.com/repos/$repo/releases/latest" "$work/release.json" ||
+        { echo "Не удалось получить описание релиза $repo с GitHub"; exit 1; }
     tag=$(jq -er '
         .tag_name | strings | select(length > 0 and length <= 48) |
         select((explode - ("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-" | explode)) == [])
     ' "$work/release.json") || { echo 'Некорректный тег релиза Zapret'; exit 1; }
     if [ "$id" = zapret ]; then
-        zapret_module_asset "$work/release.json" "zapret_${tag}_${arch}.zip" "$work/release.zip" &&
-            zapret_module_archive_file "$work/release.zip" "(^|/)zapret[-_][^/]+\\.$format$" "$work/core.$format" &&
-            zapret_module_archive_file "$work/release.zip" "(^|/)luci-app-zapret[-_][^/]+\\.$format$" "$work/luci.$format" ||
-            { echo 'В архиве нет пары пакетов для выбранной версии OpenWrt'; exit 1; }
+        zapret_module_asset "$work/release.json" "zapret_${tag}_${arch}.zip" "$work/release.zip" || exit 1
+        if [ "$scope" = all ]; then
+            zapret_module_archive_file "$work/release.zip" "(^|/)zapret[-_][^/]+\\.$format$" "$work/core.$format" ||
+                { echo 'В архиве нет пакета движка для выбранной версии OpenWrt'; exit 1; }
+        fi
+        zapret_module_archive_file "$work/release.zip" "(^|/)luci-app-zapret[-_][^/]+\\.$format$" "$work/luci.$format" ||
+            { echo 'В архиве нет пакета LuCI для выбранной версии OpenWrt'; exit 1; }
     else
-        zapret_module_asset "$work/release.json" "zapret2_$arch.$format" "$work/core.$format" &&
-            zapret_module_asset "$work/release.json" "luci-app-zapret2.$format" "$work/luci.$format" || exit 1
+        if [ "$scope" = all ]; then
+            zapret_module_asset "$work/release.json" "zapret2_$arch.$format" "$work/core.$format" || exit 1
+        fi
+        zapret_module_asset "$work/release.json" "luci-app-zapret2.$format" "$work/luci.$format" || exit 1
     fi
     printf '%s\n' "$tag" > "$work/version"
     rm -f "$work/release.json" "$work/release.zip"
-    (cd "$work" && sha256sum "core.$format" "luci.$format" > SHA256SUMS) || exit 1
+    set -- "luci.$format"
+    [ "$scope" != all ] || set -- "core.$format" "$@"
+    (cd "$work" && sha256sum "$@" > SHA256SUMS) || exit 1
     prepared=$RUN/packages/$id
     previous=$RUN/packages/.$id.previous
     if [ -d "$prepared" ]; then
@@ -170,16 +196,27 @@ zapret_module_install() (
     init=/etc/init.d/$id
     format=$(zapret_module_manager) || exit 1
     prepared=$RUN/packages/$id
-    [ ! -x "$init" ] || { echo 'Служба уже установлена'; exit 1; }
-    zapret_module_check_other "$id" || exit 1
-    [ -s "$prepared/core.$format" ] && [ -s "$prepared/luci.$format" ] ||
-        { echo 'Сначала скачайте пакеты'; exit 1; }
+    set -- "$prepared/luci.$format"
+    if [ -x "$init" ]; then
+        if zapret_module_native_view "$id" >/dev/null; then
+            echo 'Движок и штатный интерфейс LuCI уже установлены.'
+            exit 0
+        fi
+    else
+        zapret_module_check_other "$id" || exit 1
+        set -- "$prepared/core.$format" "$@"
+    fi
+    for package do
+        [ -s "$package" ] || { echo 'Сначала скачайте пакеты'; exit 1; }
+    done
     (cd "$prepared" && sha256sum -c SHA256SUMS) || { echo 'Проверка скачанных пакетов не прошла'; exit 1; }
     case "$format" in
-        apk) apk --no-cache add --allow-untrusted "$prepared/core.apk" "$prepared/luci.apk" ;;
-        ipk) opkg update && opkg install "$prepared/core.ipk" "$prepared/luci.ipk" ;;
+        apk) apk --no-cache add --allow-untrusted "$@" ;;
+        ipk) opkg update && opkg install "$@" ;;
     esac || exit 1
     [ -x "$init" ] || { echo 'Пакеты установлены, init-служба не найдена'; exit 1; }
+    zapret_module_native_view "$id" >/dev/null ||
+        { echo "Движок установлен, но пакет luci-app-$id не предоставил ожидаемые страницы LuCI"; exit 1; }
     echo 'Движок и штатный интерфейс LuCI установлены.'
 )
 
@@ -192,7 +229,7 @@ zapret_module_action_allowed() {
 }
 
 zapret_module_execute() {
-    local action=$1 id command init
+    local action=$1 id command init scope
     id=${action%%:*}
     command=${action#*:}
     zapret_module_action_allowed "$id" "$command" || return 1
@@ -201,8 +238,17 @@ zapret_module_execute() {
         download) zapret_module_download "$id" ;;
         install) zapret_module_install "$id" ;;
         install-latest)
-            [ ! -x "$init" ] || { echo 'Служба уже установлена'; return 1; }
-            zapret_module_check_other "$id" && zapret_module_download "$id" && zapret_module_install "$id"
+            if [ -x "$init" ]; then
+                if zapret_module_native_view "$id" >/dev/null; then
+                    echo 'Движок и штатный интерфейс LuCI уже установлены.'
+                    return 0
+                fi
+                scope=luci
+            else
+                zapret_module_check_other "$id" || return 1
+                scope=all
+            fi
+            zapret_module_download "$id" "$scope" && zapret_module_install "$id"
             ;;
         start|restart|enable|stop|disable)
             [ -x "$init" ] || { echo 'Служба не установлена'; return 1; }
