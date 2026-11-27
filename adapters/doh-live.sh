@@ -2,11 +2,14 @@
 
 OWS_DOH_LIVE=/etc/ows/doh-live
 OWS_DOH_CONFIG=/etc/config/https-dns-proxy
+OWS_DOH_INIT=/etc/init.d/https-dns-proxy
 OWS_DOH_RUNTIME=/tmp/ows-doh-watch
 OWS_DOH_LEGACY_LOCK=/tmp/zm-doh-failover.lock
 OWS_DOH_CATALOG=/usr/lib/ows/doh-providers.txt
 
 doh_owned() { [ -f "$OWS_DOH_LIVE/owner" ]; }
+doh_standalone() { grep -Fxq standalone "$OWS_DOH_LIVE/owner" 2>/dev/null; }
+doh_auto_enabled() { ! doh_standalone || [ -f "$OWS_DOH_LIVE/auto" ]; }
 doh_setting() { awk -F= -v key="$2" '$1==key {value=substr($0,length($1)+2)} END {print value}' "$1"; }
 
 doh_catalog() {
@@ -101,7 +104,103 @@ doh_atomic_copy() (
 )
 
 doh_start_proxy() {
-    timeout 20 /etc/init.d/https-dns-proxy start 9>&- >/dev/null 2>&1
+    timeout 20 "$OWS_DOH_INIT" start 9>&- >/dev/null 2>&1
+}
+
+doh_proxy_running() {
+    ubus -S call service list '{"name":"https-dns-proxy"}' 2>/dev/null |
+        jsonfilter -e '@["https-dns-proxy"].instances.*.running' | grep -Fxq true
+}
+
+doh_can_initialize() {
+    [ -x "$OWS_DOH_INIT" ] && [ -s "$OWS_DOH_CONFIG" ] && ! doh_owned && doh_guard_intact &&
+        [ ! -s "$OWS_DOH_MANAGER/doh_failover" ] && ! doh_proxy_running && ! "$OWS_DOH_INIT" enabled
+}
+
+doh_dnsmasq_uses_local() {
+    uci -q get 'dhcp.@dnsmasq[0].server' | grep -Eq '(^|[[:space:]])127[.]0[.]0[.]1#5053([[:space:]]|$)'
+}
+
+doh_install_package() (
+    local fresh=0
+    if [ ! -x "$OWS_DOH_INIT" ]; then
+        [ -z "$(uci -q changes dhcp)$(uci -q changes https-dns-proxy)" ] ||
+            { echo 'Сохраните правки DNS перед установкой DoH.'; exit 1; }
+        if [ ! -e "$OWS_DOH_CONFIG" ]; then fresh=1; fi
+    fi
+    ows_install_repo_packages https-dns-proxy luci-app-https-dns-proxy || exit 1
+    [ "$fresh" = 1 ] || exit 0
+    [ -x "$OWS_DOH_INIT" ] && "$OWS_DOH_INIT" disable &&
+        timeout 20 "$OWS_DOH_INIT" stop 9>&- && ! doh_proxy_running || exit 1
+    uci -q set https-dns-proxy.config.force_dns=0 && uci -q commit https-dns-proxy
+)
+
+doh_initialize_recover() (
+    local pending="$OWS_DOH_LIVE/initialize.pending"
+    [ -d "$pending" ] || exit 0
+    if [ ! -f "$pending/confirmed" ]; then
+        "$OWS_DOH_INIT" disable && timeout 20 "$OWS_DOH_INIT" stop 9>&- || exit 1
+        if cmp -s "$OWS_DOH_CONFIG" "$pending/next"; then
+            doh_atomic_copy "$pending/before" "$OWS_DOH_CONFIG" || exit 1
+        elif ! cmp -s "$OWS_DOH_CONFIG" "$pending/before"; then exit 1; fi
+        rm -f "$OWS_DOH_LIVE/owner" "$OWS_DOH_LIVE/providers" || exit 1
+    fi
+    rm -rf "$pending"
+)
+
+doh_initialize() (
+    umask 077
+    local order=$1 work pending="$OWS_DOH_LIVE/initialize.pending" id url boot tab
+    doh_can_initialize || { echo 'Первичная настройка доступна для остановленного DoH без действующего управления.'; exit 1; }
+    [ -z "$(uci -q changes https-dns-proxy)$(uci -q changes dhcp)" ] ||
+        { echo 'Сохраните правки DoH и dnsmasq.'; exit 1; }
+    [ ! -e "$pending" ] && [ ! -e "$OWS_DOH_LIVE/providers" ] && [ ! -e "$OWS_DOH_LIVE/auto" ] || exit 3
+    mkdir -p "$OWS_DOH_LIVE" || exit 1
+    work=$(mktemp -d "$OWS_DOH_LIVE/.initialize.XXXXXX") || exit 1
+    trap 'rm -rf "$work"' EXIT
+    trap 'exit 1' INT TERM HUP
+    doh_policy_rows "$order" > "$work/providers" || exit 1
+    tab=$(printf '\t')
+    IFS="$tab" read -r id url boot < "$work/providers"
+    doh_probe_id "$work/providers" "$id" || { echo 'Основной DoH не отвечает. Настройки не изменены.'; exit 1; }
+    cp -p "$OWS_DOH_CONFIG" "$work/before" &&
+        mkdir "$work/uci" "$work/overlay" "$work/delta" &&
+        cp -p "$work/before" "$work/uci/https-dns-proxy" || exit 1
+    staged() { uci -q -c "$work/uci" -C "$work/overlay" -t "$work/delta" "$@"; }
+    while staged get 'https-dns-proxy.@https-dns-proxy[0]' >/dev/null; do
+        staged delete 'https-dns-proxy.@https-dns-proxy[0]' || exit 1
+    done
+    local section
+    section=$(staged add https-dns-proxy https-dns-proxy) || exit 1
+    staged set "https-dns-proxy.$section.resolver_url=$url" &&
+        staged set "https-dns-proxy.$section.bootstrap_dns=$boot" &&
+        staged set "https-dns-proxy.$section.listen_addr=127.0.0.1" &&
+        staged set "https-dns-proxy.$section.listen_port=5053" &&
+        staged set https-dns-proxy.config.force_dns=0 &&
+        staged set 'https-dns-proxy.config.dnsmasq_config_update=*' &&
+        staged commit https-dns-proxy && mv "$work/uci/https-dns-proxy" "$work/next" || exit 1
+    printf '%s\n' standalone > "$work/owner" || exit 1
+    doh_can_initialize && cmp -s "$OWS_DOH_CONFIG" "$work/before" && mv "$work" "$pending" || exit 1
+    trap 'if doh_initialize_recover; then exit 1; else exit 3; fi' INT TERM HUP
+    if doh_atomic_copy "$pending/next" "$OWS_DOH_CONFIG" && doh_start_proxy && doh_dnsmasq_uses_local && doh_wait_dns "$url" &&
+        "$OWS_DOH_INIT" enable && doh_atomic_copy "$pending/providers" "$OWS_DOH_LIVE/providers" &&
+        doh_atomic_copy "$pending/owner" "$OWS_DOH_LIVE/owner" && : > "$pending/confirmed"; then
+        doh_initialize_recover || exit 3
+        echo 'DoH запущен, цепочка сохранена. Автопереключение отключено.'
+    else
+        doh_initialize_recover || { echo 'Откат первичной настройки DoH требует восстановления.'; exit 3; }
+        echo 'DNS не прошёл проверку. Предыдущая конфигурация восстановлена.'
+        exit 1
+    fi
+)
+
+doh_set_auto() {
+    doh_standalone && doh_guard_intact || return 1
+    case "$1" in
+        on) touch "$OWS_DOH_LIVE/auto" ;;
+        off) rm -f "$OWS_DOH_LIVE/auto" ;;
+        *) return 1 ;;
+    esac
 }
 
 doh_process_uses() {
@@ -256,7 +355,7 @@ doh_run_policy() (
 doh_watch() (
     umask 077
     local policy="$OWS_DOH_LIVE/providers" current
-    doh_owned || exit 0
+    doh_owned && doh_auto_enabled || exit 0
     doh_guard_intact || { echo 'Защита от записи Zapret-Manager изменилась.'; exit 1; }
     [ ! -e "$OWS_DOH_LIVE/switch.pending" ] || exit 3
     current=$(doh_current_id "$policy") || { echo 'Активный провайдер вне импортированной цепочки.'; exit 1; }

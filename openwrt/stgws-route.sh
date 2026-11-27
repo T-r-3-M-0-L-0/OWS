@@ -78,7 +78,8 @@ choose_route() {
 # Limit concurrent probes on routers with little free memory.
 batch=0
 while read -r key kind domain; do
-    choose_route "$key" "$kind" "$domain" > "$WORK/$key.route" 9>&- &
+    # Keep the probe lock until the children exit if the parent is interrupted.
+    choose_route "$key" "$kind" "$domain" > "$WORK/$key.route" &
     batch=$((batch + 1))
     if [ "$batch" -eq 2 ]; then wait; batch=0; fi
 done < "$WORK/routes"

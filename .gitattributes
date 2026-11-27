@@ -3,3 +3,4 @@
 *.rpc text eol=lf
 *.awk text eol=lf
 /bin/ows text eol=lf
+/adapters/steer-services.conf text eol=lf

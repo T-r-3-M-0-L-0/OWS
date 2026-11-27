@@ -32,9 +32,11 @@ ows_vpn_load() {
 }
 
 ows_vpn_fetch_https() {
+    local bytes=${3:-4194304}
     case "$1" in https://?*) ;; *) return 1 ;; esac
-    (ulimit -f 8192; curl -fsSL --proto '=https' --proto-redir '=https' --connect-timeout 6 \
-        --max-time 18 --max-filesize 4194304 -o "$2" "$1") 2>/dev/null && [ -s "$2" ]
+    (ulimit -f "$((bytes / 512))"; curl -fsSL --proto '=https' --proto-redir '=https' --connect-timeout 6 \
+        --max-time 18 --max-filesize "$bytes" -o "$2" "$1") 2>/dev/null &&
+        [ -s "$2" ] && [ "$(wc -c < "$2")" -le "$bytes" ]
 }
 
 # The driver callback applies a candidate and verifies the running service.

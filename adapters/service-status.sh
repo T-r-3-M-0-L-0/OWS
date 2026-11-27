@@ -12,15 +12,9 @@ ows_service_runtime() {
 }
 
 ows_service_zapret2() {
-    local pid pids name config active
+    local config active
     [ -n "$runtime" ] || { echo unknown; return; }
-    # Only PIDs registered with the main procd service count. Standalone
-    # nfqws2 instances used by strategy-check must not mark MAIN healthy.
-    pids=$(printf '%s\n' "$runtime" | jsonfilter -e '@.zapret2.instances.*.pid' 2>/dev/null) || :
-    for pid in $pids; do
-        case "$pid" in ''|*[!0-9]*) continue ;; esac
-        if read -r name 2>/dev/null < "/proc/$pid/comm" && [ "$name" = nfqws2 ]; then echo main_ok; return; fi
-    done
+    if zapret2_main_running "$runtime"; then echo main_ok; return; fi
     config=$(uci -q show zapret2) || { echo unknown; return; }
     active=$(printf '%s\n' "$config" | zapret2_active_strategies)
     if [ "$active" = 0 ]; then echo main_disabled; else echo main_stopped; fi

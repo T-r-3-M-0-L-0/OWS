@@ -6,6 +6,7 @@
 var field = owsUI.field, button = owsUI.button;
 
 var read = rpc.declare({ object: 'ows', method: 'vpn_editor', params: ['id'] });
+var readWorkingState = rpc.declare({ object: 'ows', method: 'vpn_state', params: ['id'] });
 var readNodes = rpc.declare({ object: 'ows', method: 'vpn_nodes', params: ['id', 'target'] });
 var edit = rpc.declare({ object: 'ows', method: 'vpn_edit', params: ['id', 'change'] });
 var action = rpc.declare({ object: 'ows', method: 'vpn_action', params: ['id', 'action', 'target'] });
@@ -33,7 +34,26 @@ function subsection(title, content) {
     return E('details', {class:'ows-section'}, [E('summary', {}, title), content]);
 }
 
+function configuredNodesLabel(value) {
+    if (value === undefined) return _('Настройка недоступна');
+    var indices = Array.isArray(value) ? value : [value];
+    indices = indices.filter(function(index) { return Number.isInteger(index) && index >= 0; });
+    return indices.length ? indices.map(function(index) { return '#' + index; }).join(', ') : _('Автовыбор');
+}
+
+function activeNodesLabel(nodes, output, state) {
+    if (state && state.running === false) return _('steer остановлен');
+    if (output && output.runtime && output.up === false) return _('Выход недоступен');
+    if (!Array.isArray(nodes) || !nodes.length) return _('steer пока не сообщил узел');
+    return nodes.map(function(node) {
+        var index = Number.isInteger(node.index) ? '#' + node.index : '';
+        return [node.name, index].filter(Boolean).join(' · ');
+    }).join(', ');
+}
+
 return baseclass.extend({
+    configuredNodesLabel: configuredNodesLabel,
+    activeNodesLabel: activeNodesLabel,
     init: function(entry, follow, runtime) {
         var panels = {
             connections:E('div'), services:E('div'), devices:E('div'),
@@ -50,6 +70,33 @@ return baseclass.extend({
         var writeMode = 'draft';
         var measurements = Object.create(null);
         var batches = Object.create(null);
+        var preparedCatalog = new Map();
+        var workingState = null;
+        var workingError = false;
+        var workingRequest = 0;
+        var refreshNodeSummary = function() {};
+        var subscriptionOutput = '';
+        var subscriptionNodesOpen = false;
+
+        function updateWorkingState(data) {
+            if (!data || data.error || !Array.isArray(data.outputs)) {
+                workingState = null;
+                workingError = true;
+            } else {
+                workingState = data;
+                workingError = false;
+            }
+            refreshNodeSummary();
+        }
+
+        function refreshWorkingState() {
+            var request = ++workingRequest;
+            return readWorkingState(entry.id).then(function(data) {
+                if (request === workingRequest) updateWorkingState(data);
+            }, function() {
+                if (request === workingRequest) updateWorkingState(null);
+            });
+        }
 
         function submit(changes, operation, target, onResult) {
             if (!snapshot || busy) return;
@@ -68,7 +115,7 @@ return baseclass.extend({
                 notice.textContent = _('Задание в очереди');
                 follow(result.job, function(finalState) {
                     notice.textContent = finalState.phase === 'done' ? (operation ? _('Задание завершено') :
-                        (writeMode === 'live' ? _('Изменение применено') : _('Изменение сохранено в черновике'))) :
+                        (writeMode === 'live' ? _('Изменение применено') : _('Сохранено в манифесте. Чтобы включить изменения, проверьте и примените его.'))) :
                         _('Задание не прошло проверку');
                     output(finalState.job).then(function(detail) {
                         log.textContent = detail.output || '';
@@ -92,10 +139,64 @@ return baseclass.extend({
             return button(saveLabel(), function() { submit(callback()); }, disabled);
         }
 
-        function saveLabel() { return writeMode === 'live' ? _('Применить') : _('Сохранить в черновик'); }
+        function saveLabel() { return writeMode === 'live' ? _('Применить') : _('Сохранить настройки'); }
 
         function actions(elements) { return E('div', { class: 'ows-actions' }, elements); }
         function fields(elements) { return E('div', { class: 'ows-fields' }, elements); }
+
+        function renderOutputSetup(data) {
+            if (!data.output_setup) return '';
+            var editable = data.outputs.filter(function(item) { return item.alias != null; });
+            var existing = dropdown([['', _('Новый выход')]].concat(editable.map(outputOption)));
+            var kind = dropdown([['interface', _('Существующий туннель')], ['warp', 'Cloudflare WARP']]);
+            var name = E('input', {type:'text', class:'cbi-input-text', maxlength:'18', placeholder:'work'});
+            var device = dropdown([['', _('Выберите интерфейс')]].concat(data.interfaces.map(function(dev) { return [dev, dev]; })));
+            var transport = dropdown([['awg','AWG'], ['masque','MASQUE']]);
+            var count = dropdown([1,2,3,4].map(function(n) { return [String(n),String(n)]; }));
+            var ifaceFields = field(_('Интерфейс OpenWrt'), device);
+            var warpFields = fields([field(_('Транспорт WARP'), transport), field(_('Число туннелей'), count)]);
+            var note = E('p');
+            var apply = save(function() {
+                return {type:'output_save', original:existing.value, name:name.value.trim(), kind:kind.value,
+                    device:device.value, transport:transport.value, count:Number(count.value)};
+            });
+            var remove = button(_('Удалить выход'), function() {
+                if (existing.value && window.confirm(_('Удалить выбранный выход из манифеста?')))
+                    submit({type:'output_remove', original:existing.value});
+            }, true);
+
+            function update() {
+                var warp = kind.value === 'warp';
+                ifaceFields.hidden = warp;
+                warpFields.hidden = !warp;
+                apply.disabled = !/^[A-Za-z0-9_][A-Za-z0-9_-]{0,17}$/.test(name.value.trim()) || (!warp && !device.value);
+                note.textContent = warp ? _('Регистрацией и выбором точки WARP управляет плагин steer после применения манифеста.') :
+                    _('Выберите сетевое устройство уже настроенного WireGuard, OpenVPN или другого туннеля.');
+            }
+
+            function selectOutput() {
+                var current = editable.find(function(item) { return item.id === existing.value; });
+                kind.value = current ? current.kind : 'interface';
+                name.value = current ? current.alias : '';
+                device.value = current && data.interfaces.includes(current.device) ? current.device : '';
+                transport.value = current && current.transport ? current.transport : 'awg';
+                count.value = current && current.count ? String(current.count) : '1';
+                kind.disabled = name.disabled = remove.disabled = false;
+                if (current) kind.disabled = name.disabled = true;
+                else remove.disabled = true;
+                update();
+            }
+
+            existing.addEventListener('change', selectOutput);
+            kind.addEventListener('change', update);
+            device.addEventListener('change', update);
+            name.addEventListener('input', update);
+            selectOutput();
+            return subsection(_('WARP и туннели'), E('div', {}, [
+                fields([field(_('Выход'), existing), field(_('Тип'), kind), field(_('Имя выхода'), name)]),
+                ifaceFields, warpFields, note, actions([apply, remove])
+            ]));
+        }
 
         function renderConnections(data) {
             var route = dropdown([['vpn','VPN'], ['tunnel',_('Туннель')], ['warp','WARP']]);
@@ -110,8 +211,16 @@ return baseclass.extend({
             }
             route.addEventListener('change', targets);
             targets();
-            var source = dropdown(data.outputs.filter(function(item) { return item.subscription; }).map(outputOption));
+            var subscriptions = data.outputs.filter(function(item) { return item.subscription; });
+            var source = dropdown(subscriptions.map(outputOption), subscriptions.some(function(item) {
+                return item.id === subscriptionOutput;
+            }) ? subscriptionOutput : undefined);
+            if (source.value !== subscriptionOutput) {
+                subscriptionOutput = source.value;
+                subscriptionNodesOpen = false;
+            }
             var table = E('div');
+            var selectionSummary = E('div', {'aria-live':'polite'});
             var selectedNode = null;
             var nodeRows = [];
             var summary = E('p', {'aria-live':'polite'});
@@ -120,9 +229,37 @@ return baseclass.extend({
             var pageInfo = E('span', {'aria-live':'polite'});
             var previousNodes = button(_('Назад'), function() { loadNodes(nodePage - 1); }, true);
             var nextNodes = button(_('Дальше'), function() { loadNodes(nodePage + 1); }, true);
+            function showNodeSummary() {
+                var current = data.outputs.find(function(item) { return item.id === source.value; });
+                selectionSummary.replaceChildren();
+                if (!current || current.configured_nodes === undefined) return;
+                var outputs = workingState ? workingState.outputs : [];
+                var working = outputs.find(function(item) { return item.id === source.value; });
+                var waiting = workingError ? _('Состояние недоступно') : _('Читаем состояние…');
+                selectionSummary.appendChild(E('dl', {}, owsUI.details([
+                    [_('Сохранённый выбор'), configuredNodesLabel(current.configured_nodes)],
+                    [_('Применённый выбор'), working ? configuredNodesLabel(working.configured_nodes) :
+                        (workingState ? _('Выход ещё не применён') : waiting)],
+                    [_('Узел в работе'), working ? activeNodesLabel(working.active_nodes, working, workingState) :
+                        (workingState ? _('Выход ещё не запущен') : waiting)]
+                ])));
+                var group = outputs.find(function(item) {
+                    return Array.isArray(item.members) && item.members.includes(source.value) &&
+                        item.selected && item.selected !== source.value;
+                });
+                if (group) {
+                    var alternative = outputs.find(function(item) { return item.id === group.selected; });
+                    selectionSummary.appendChild(E('p', {}, _('Группа «%s» сейчас использует %s.').format(
+                        group.label || group.id, alternative ? (alternative.label || alternative.id) : group.selected)));
+                }
+                if (current.nodes_pending) selectionSummary.appendChild(E('p', {},
+                    _('Чтобы сменить рабочий узел, нажмите «Проверить изменения», затем «Применить манифест».')));
+            }
+            refreshNodeSummary = showNodeSummary;
             function metricLabel(value) {
                 if (value === null) return _('Измеряем…');
                 if (!value) return '—';
+                if (value.stale) return _('Устарело');
                 if (!value.ok) return _('Нет ответа');
                 return Number.isFinite(value.handshake_ms) && value.handshake_ms >= 0 ?
                     String(value.handshake_ms) + ' ' + _('мс') : _('Ответил');
@@ -168,7 +305,8 @@ return baseclass.extend({
             }
             function showBatchSummary(prefix) {
                 var batch = batches[prefix];
-                summary.textContent = batch ? _('Доступно') + ' · ' + batch.working + ' / ' + batch.total : '';
+                summary.textContent = batch ? _('Проверено') + ' · ' + batch.checked + ' / ' + batch.total +
+                    ' · ' + _('Доступно') + ' · ' + batch.working : '';
             }
             function loadNodes(page) {
                 var selected = source.value;
@@ -180,8 +318,12 @@ return baseclass.extend({
                     if (result.error) { notice.textContent = result.error; return; }
                     var current = data.outputs.find(function(item) { return item.id === selected; });
                     nodeRows = (page === 1 ? [{index:-1, name:_('Автоматически')}] : []).concat(result.nodes || []);
-                    if (selectedNode == null) selectedNode = current && Number.isInteger(current.configured_nodes) ?
-                        current.configured_nodes : -1;
+                    if (selectedNode == null && current) {
+                        var saved = current.configured_nodes;
+                        if (Number.isInteger(saved)) selectedNode = saved;
+                        else if (Array.isArray(saved) && saved.length === 1) selectedNode = saved[0];
+                        else if (saved == null || (Array.isArray(saved) && !saved.length)) selectedNode = -1;
+                    }
                     nodePage = page;
                     var pages = Math.max(1, Math.ceil(result.total / 80));
                     pageInfo.textContent = pages > 1 ? page + ' / ' + pages : '';
@@ -193,28 +335,37 @@ return baseclass.extend({
                     readBatchPage(prefix, page);
                 }, function() { notice.textContent = _('Не удалось загрузить узлы'); });
             }
-            var fetchNodes = button(_('Загрузить узлы'), function() { loadNodes(1); }, !source.options.length);
+            var fetchNodes = button(_('Загрузить узлы'), function() {
+                subscriptionNodesOpen = true;
+                refreshWorkingState();
+                loadNodes(1);
+            }, !source.options.length);
             source.addEventListener('change', function() {
+                subscriptionOutput = source.value;
+                subscriptionNodesOpen = true;
                 nodeRequest++;
                 selectedNode = null;
                 nodeRows = [];
                 summary.textContent = '';
                 pageInfo.textContent = '';
                 previousNodes.disabled = nextNodes.disabled = true;
+                showNodeSummary();
                 loadNodes(1);
                 renderNodes();
             });
+            showNodeSummary();
             renderNodes();
             panels.connections.replaceChildren(
                 E('h4', {}, _('Подключения')),
                 sections.includes('connections') ? E('div', {}, [
+                    renderOutputSetup(data),
                     E('h4', {}, _('Направление для сервисов')),
                     fields([field(_('Тип выхода'), route), field(_('Настроенный выход'), dest)]), actions([use])
                 ]) : '',
                 sections.includes('nodes') ? E('div', {}, [
                     E('h4', {}, _('Узлы подписки')),
                     fields([field(_('Подписка выхода'), source)]),
-                    summary, table, actions([previousNodes, pageInfo, nextNodes]),
+                    selectionSummary, summary, table, actions([previousNodes, pageInfo, nextNodes]),
                 actions([fetchNodes, button(_('Проверить выбранный узел'), function() {
                     if (selectedNode == null || selectedNode < 0) {
                         notice.textContent = _('Сначала выберите конкретный узел');
@@ -222,7 +373,7 @@ return baseclass.extend({
                     }
                     var target = source.value + ':' + selectedNode;
                     var key = data.revision + ':' + target;
-                    if (submit(null, 'probe_node', target, function(detail) {
+                    if (submit(null, 'probe_node', target + ':' + data.revision, function(detail) {
                         measurements[key] = detail.probe || {ok:false};
                         renderNodes();
                     })) {
@@ -240,7 +391,8 @@ return baseclass.extend({
                             if (key.startsWith(prefix) && measurements[key] === null) delete measurements[key];
                         });
                         if (report && report.kind === 'node_batch') {
-                            batches[prefix] = {job:job, working:report.working, total:report.total};
+                            batches[prefix] = {job:job, working:report.working, total:report.total,
+                                checked:report.checked == null ? report.total : report.checked};
                             if (source.value === selected) {
                                 showBatchSummary(prefix);
                                 readBatchPage(prefix, nodePage);
@@ -258,12 +410,13 @@ return baseclass.extend({
                         });
                         renderNodes();
                     }
-                }, !capabilities.probe_all_nodes), button(_('Сохранить узел'), function() {
+                }, !capabilities.probe_all_nodes), button(_('Сохранить выбор'), function() {
                     if (selectedNode != null) submit({type:'node', output:source.value, node:selectedNode});
-                    else notice.textContent = _('Сначала загрузите узлы');
+                    else notice.textContent = _('Загрузите список и выберите узел или автовыбор.');
                 })])
                 ]) : ''
             );
+            if (subscriptionNodesOpen && source.value) loadNodes(1);
         }
 
         function renderServices(data) {
@@ -289,7 +442,7 @@ return baseclass.extend({
                     return false;
                 }
                 serviceStatus.textContent = writeMode === 'live' ? _('Проверяем и применяем список…') :
-                    _('Проверяем список и сохраняем черновик…');
+                    _('Проверяем список и сохраняем его в манифесте…');
                 return true;
             }
 
@@ -339,6 +492,8 @@ return baseclass.extend({
                         listPanel.replaceChildren(E('p', {}, _('Не удалось открыть состав списка.')));
                         return;
                     }
+                    if (report.catalog_id && report.revision === data.revision)
+                        preparedCatalog.set(report.catalog_id, {revision:report.revision, job:job});
                     var kind = dropdown([['domains', _('Домены') + ' (' + report.domains + ')'],
                         ['prefixes', _('Подсети') + ' (' + report.prefixes + ')']], report.domains ? 'domains' : 'prefixes');
                     var page = 1;
@@ -422,7 +577,7 @@ return baseclass.extend({
                     return;
                 }
                 var pages = Math.ceil(matches.length / 20);
-                var serviceState = writeMode === 'live' ? _('Активен') : _('В черновике');
+                var serviceState = writeMode === 'live' ? _('Активен') : _('Сохранённый выбор');
                 var rows = matches.slice((catalogPage - 1) * 20, catalogPage * 20).map(function(item) {
                     var rule = assigned.get(item.id);
                     var active = !!(rule && rule.enabled);
@@ -431,7 +586,9 @@ return baseclass.extend({
                     check.disabled = !rule && !presetOutput.options.length;
                     function update(value) {
                         if (rule) return saveService({type:'service', index:rule.index, output:rule.output, enabled:value});
-                        return saveService({type:'catalog_service', id:item.id, output:presetOutput.value});
+                        var prepared = preparedCatalog.get(item.id);
+                        return saveService({type:'catalog_service', id:item.id, output:presetOutput.value,
+                            prepared_job:prepared && prepared.revision === data.revision ? prepared.job : undefined});
                     }
                     check.addEventListener('change', function() {
                         var requested = check.checked;
@@ -443,7 +600,8 @@ return baseclass.extend({
                         E('td', {class:'td'}, [E('strong', {}, item.name), E('div', {}, item.description || item.group)]),
                         E('td', {class:'td'}, [
                             button(_('Домены и подсети'), function() {
-                                inspect(rule ? 'rule:' + data.revision + ':' + rule.index : 'catalog:' + item.id);
+                                if (rule) inspect('rule:' + data.revision + ':' + rule.index);
+                                else inspect(item.prepare_small ? 'small:' + data.revision + ':' + item.id : 'catalog:' + item.id);
                             }, !capabilities.preview_service_lists),
                             button(_('Добавить список'), function() { update(true); }, active || !presetOutput.options.length)
                         ])
@@ -616,22 +774,28 @@ return baseclass.extend({
 
         function tab(id, label, content) {
             return {id:'vpn-' + entry.id + '-' + id, label:label, content:content,
-                activate:function() { load(false); }};
+                activate:function() {
+                    if (id === 'connections' && sections.includes('nodes')) refreshWorkingState();
+                    return load(false);
+                }};
         }
 
         return {
-            configure: function(ui, actionsAvailable) {
+            configure: function(ui, actionsAvailable, activeState) {
                 sections = Array.isArray(ui.editor) ? ui.editor : [];
                 capabilities = actionsAvailable || {};
                 writeMode = ui.write_mode === 'live' ? 'live' : 'draft';
+                if (activeState && Array.isArray(activeState.outputs)) {
+                    workingRequest++;
+                    updateWorkingState(activeState);
+                }
             },
             tabs: function() {
                 var tabs = [tab('connections', _('Подключения и маршрутизация'), E('div', {}, [
                     sections.includes('connections') || sections.includes('nodes') ? panels.connections : '',
                     subsection(_('Выходы · рабочее состояние'), runtime.outputs),
                     subsection(_('Маршруты · рабочие правила'), runtime.routes),
-                    sections.includes('settings') ? subsection(writeMode === 'live' ? _('Настройки DNS и выхода') :
-                        _('Настройки DNS и выхода · черновик'), panels.settings) : ''
+                    sections.includes('settings') ? subsection(_('Настройки DNS и выхода'), panels.settings) : ''
                 ]))];
                 if (sections.includes('services')) tabs.push(tab('services', _('Сервисы'),
                     E('div', {}, [runtime.listActions, panels.services])));

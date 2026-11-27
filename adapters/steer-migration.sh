@@ -23,13 +23,13 @@ steer_prepare_migration() (
     used=$(du -sk "$OWS_STEER_MANAGER" | awk 'NR==1 {print $1}')
     free=$(df -Pk "$OWS_STEER_MIGRATIONS" | awk 'END {print $4}')
     [ "${used:-0}" -le 8192 ] && [ "${free:-0}" -ge 16384 ] ||
-        steer_migration_error 'Недостаточно места для черновика миграции'
+        steer_migration_error 'Недостаточно места для манифеста переноса'
     count=0
     for dir in "$OWS_STEER_MIGRATIONS"/draft.*; do
         [ -d "$dir" ] || break
         count=$((count + 1))
     done
-    [ "$count" -lt 6 ] || steer_migration_error 'Хранилище черновиков заполнено'
+    [ "$count" -lt 6 ] || steer_migration_error 'Хранилище манифестов заполнено'
 
     draft=$(mktemp -d "$OWS_STEER_MIGRATIONS/draft.XXXXXX") || exit 1
     pointer=''
@@ -85,8 +85,8 @@ steer_prepare_migration() (
     rm -f "$draft/reversed.json" "$draft/original-normalized.json"
 
     result=$(timeout 15 steer ctl check < "$draft/spec.json" 2>/dev/null | jq -er '.code | numbers') ||
-        steer_migration_error 'Демон steer не ответил на проверку черновика'
-    [ "$result" = 0 ] || steer_migration_error "steer отклонил черновик, код $result"
+        steer_migration_error 'Демон steer не ответил на проверку манифеста переноса'
+    [ "$result" = 0 ] || steer_migration_error "steer отклонил манифест переноса, код $result"
     cmp -s "$OWS_STEER_SPEC" "$draft/backup/spec.json" ||
         steer_migration_error 'Активная спека изменилась во время импорта'
     while IFS= read -r source; do
@@ -100,6 +100,6 @@ steer_prepare_migration() (
     pointer=$(mktemp "$OWS_STEER_MIGRATIONS/.latest.XXXXXX") || exit 1
     printf '%s\n' "${draft##*/}" > "$pointer" && mv -f "$pointer" "$OWS_STEER_MIGRATIONS/latest" || exit 1
     committed=1
-    printf 'Черновик %s проверен ядром steer. Скопировано файлов: %s. Заданий Zapret Manager: %s.\n' \
+    printf 'Манифест переноса %s проверен ядром steer. Скопировано файлов: %s. Заданий Zapret Manager: %s.\n' \
         "${draft##*/}" "$refs" "$jobs"
 )

@@ -23,7 +23,7 @@ function policySlot(label, profiles, families, selected, optional) {
         options.appendChild(E('option', {value:id}, group[0].label));
     });
     var choices = [publicOptions, geoOptions];
-    if (optional) choices.unshift(E('option', {value:''}, _('Без резерва')));
+    choices.unshift(E('option', {value:''}, optional ? _('Без резерва') : _('Выберите провайдера')));
     var provider = E('select', {class:'cbi-input-select'}, choices);
     var variant = E('select', {class:'cbi-input-select'});
     var notes = E('p');
@@ -51,7 +51,7 @@ function policySlot(label, profiles, families, selected, optional) {
     }
 
     if (selected) provider.value = selected.family;
-    else if (optional) provider.value = '';
+    else provider.value = '';
     chooseVariant(selected ? selected.id : '');
     provider.addEventListener('change', function() { chooseVariant(''); });
     variant.addEventListener('change', describe);
@@ -75,17 +75,20 @@ return baseclass.extend({
             var managed = state && state.owner === 'ows';
             var migration = state && state.owner === 'zapret-manager' && state.installed;
             var complete = state && state.installed && !state.limited;
-            policy.disabled = busy || !managed || !state.guard;
+            policy.disabled = busy || !state || !(state.can_initialize || (managed && state.guard));
             controls.replaceChildren(
                 owsUI.button(_('Обновить состояние'), load, busy),
                 state && (!state.installed || !state.native) ? owsUI.button(state.installed ? _('Установить интерфейс LuCI') : _('Установить DoH'), function() {
-                    if (window.confirm(_('Установить HTTPS DNS Proxy из репозитория OpenWrt? Пакет может запустить службу и изменить DNS.')))
+                    if (window.confirm(_('Установить HTTPS DNS Proxy из репозитория OpenWrt?')))
                         submit('install');
                 }, busy) : '',
                 state && state.native && !managed ? E('a', {href:L.url('admin','services','https-dns-proxy')}, _('Настройки HTTPS DNS Proxy')) : '',
                 complete ? owsUI.button(_('Проверить DNS'), function() { submit('check'); }, busy) : '',
                 managed ? owsUI.button(_('Проверить переключение'), function() {
                     if (window.confirm(_('Временно переключить DoH на резерв и вернуться на основной сервер?'))) submit('test-switch');
+                }, busy || !state.guard) : '',
+                managed && state.standalone_setup ? owsUI.button(state.failover ? _('Выключить автопереключение') : _('Включить автопереключение'), function() {
+                    submit(state.failover ? 'auto:off' : 'auto:on');
                 }, busy || !state.guard) : '',
                 migration ? owsUI.button(_('Собрать черновик'), function() { submit('prepare'); }, busy) : '',
                 migration ? owsUI.button(_('Сверить черновик'), function() { submit('verify'); }, busy || !state.migration.prepared) : '',
@@ -96,7 +99,8 @@ return baseclass.extend({
         }
 
         function renderPolicy(data, profiles) {
-            policy.hidden = data.owner !== 'ows' || !data.available_providers.length || !data.providers.length;
+            var initialize = data.can_initialize;
+            policy.hidden = !data.available_providers.length || !(initialize || (data.owner === 'ows' && data.providers.length));
             if (policy.hidden) return;
             var labels = [_('Основной провайдер'), _('Первый резерв'), _('Второй резерв'), _('Третий резерв')];
             var families = new Map();
@@ -110,10 +114,17 @@ return baseclass.extend({
             policy.replaceChildren(
                 E('legend', {}, _('Цепочка переключения')),
                 E('p', {}, _('Выберите провайдера и профиль для каждого места в цепочке. Резервы проверяются по порядку.')),
-                owsUI.form([E('div', {class:'ows-fields'}, slots.map(function(slot) { return slot.content; }))], _('Сохранить цепочку'), function() {
-                    var order = slots.map(function(slot) { return slot.value(); }).filter(Boolean);
-                    if (order.length < 2 || new Set(order).size !== order.length) {
+                owsUI.form([E('div', {class:'ows-fields'}, slots.map(function(slot) { return slot.content; }))],
+                    initialize ? _('Проверить и запустить DoH') : _('Сохранить цепочку'), function() {
+                    var selected = slots.map(function(slot) { return slot.value(); });
+                    var order = selected.filter(Boolean);
+                    if (!selected[0] || !selected[1] || new Set(order).size !== order.length) {
                         feedback.show(_('Выберите основной профиль и от одного до трёх резервных без повторов.'));
+                        return;
+                    }
+                    if (initialize) {
+                        if (window.confirm(_('Запустить DoH и направить запросы dnsmasq на выбранный основной сервер?')))
+                            return submit('initialize:' + order.join(','));
                         return;
                     }
                     return submit('configure:' + data.providers.join(',') + ':' + order.join(','));
@@ -154,7 +165,7 @@ return baseclass.extend({
                     [_('Задания Zapret-Manager'), data.owner === 'zapret-manager' ? data.legacy_jobs : ''],
                     [_('Черновик'), data.owner === 'zapret-manager' ? mark + (draft.prepared ? ' · ' + draft.files + ' ' + _('файлов') : '') : '']
                 ]));
-                resolvers.replaceChildren(data.resolvers.length ? owsUI.table([_('Сервер DoH'), _('Локальный адрес'), _('Порт')],
+                resolvers.replaceChildren(!data.can_initialize && data.resolvers.length ? owsUI.table([_('Сервер DoH'), _('Локальный адрес'), _('Порт')],
                     data.resolvers.map(function(item) { return [item.host, item.listen === 'other' ? '—' : item.listen, String(item.port || '—')]; })) : '');
                 renderPolicy(data, profiles);
             }).catch(function() {

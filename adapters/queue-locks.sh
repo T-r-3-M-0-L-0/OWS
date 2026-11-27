@@ -2,10 +2,10 @@
 
 job_resources() {
     case "$1:$2" in
-        dns:check|dns:check:*|doh:check) echo dns ;;
+        dns:check|dns:check:*|doh:check|steer:list-preview:small:*) echo dns ;;
         netshift:diag) echo firewall ;;
         tg-ws-proxy:check|tg-ws-proxy:start|tg-ws-proxy:stop|tg-ws-proxy:restart) echo telegram ;;
-        doh:watch|doh:test-switch|doh:configure:*) echo dns firewall ;;
+        doh:watch|doh:test-switch|doh:configure:*|doh:initialize:*|doh:auto:*|steer:probe:*) echo dns firewall ;;
         *) echo dns firewall telegram ;;
     esac
 }
@@ -16,6 +16,37 @@ priority_job() {
         zapret-module:zapret2:classify-stop|zapret-module:zapret2:builder-stop) return 0 ;;
         *) return 1 ;;
     esac
+}
+
+diagnostic_pair_class() {
+    case "$1:$2" in
+        dns:check|dns:check:*) echo dns ;;
+        tg-ws-proxy:check) echo telegram ;;
+        *) return 1 ;;
+    esac
+}
+
+doh_recovery_waiting() {
+    local ticket id
+    for ticket in "$STATE/doh-live/initialize.pending" "$STATE/doh-live/takeover.pending" "$STATE/doh-live/switch.pending"; do
+        [ ! -e "$ticket" ] || return 0
+    done
+    for ticket in "$QUEUE"/*; do
+        [ -f "$ticket" ] || continue
+        id=${ticket##*/}
+        [ "$(cat "$JOBS/$id/kind" 2>/dev/null)" = doh ] || continue
+        [ "$(cat "$JOBS/$id/action" 2>/dev/null)" != watch ] || return 0
+    done
+    return 1
+}
+
+diagnostic_pair_budget() {
+    local memory free
+    # Require this headroom before admitting a second diagnostic job.
+    memory=$(awk '$1=="MemAvailable:" {print $2; exit}' /proc/meminfo)
+    [ "${memory:-0}" -ge 65536 ] || { echo memory; return 1; }
+    free=$(df -Pk "$RUN" | awk 'END {print $4}')
+    [ "${free:-0}" -ge 8192 ] || { echo tmp_space; return 1; }
 }
 
 # Call from a short-lived subshell. Locks are released together on exit.
@@ -35,7 +66,20 @@ lock_job_resources() {
 
 strategy_running() {
     pgrep -f '(/root/zapret2-tools|/usr/lib/ows)/([s]trategy-check-control[.]sh[[:space:]]+_(worker|classify_worker)|[p]reset-builder[.]sh[[:space:]]+_test_worker)([[:space:]]|$)|/opt/zapret2/[h]ealthcheck[.]sh([[:space:]]|$)' >/dev/null 2>&1 ||
-        ! ( lock_zapret2 )
+        ! ( lock_zapret2 ) || strategy_recovery_waiting
+}
+
+strategy_recovery_waiting() {
+    local base=/tmp/zapret2-strategy-ui latest
+    [ -r "$base/latest" ] || return 1
+    read -r latest < "$base/latest" 2>/dev/null || return 1
+    case "$latest" in "$base"/job-*) ;; *) return 1 ;; esac
+    case "${latest#"$base"/job-}" in ''|*[!0-9-]*) return 1 ;; esac
+    [ -f "$latest/report/restore-needed" ]
+}
+
+stgws_probes_running() {
+    [ -e /var/lock/tgws-route-smart.lock ] && ! (exec 5>/var/lock/tgws-route-smart.lock && flock -n 5)
 }
 
 job_wait() {
@@ -53,7 +97,9 @@ guard_queued_job() {
         return 75
     fi
     if ! priority_job "$kind" "$action" && strategy_running; then
-        job_wait "$id" "$status" strategy || return 1
+        local reason=strategy
+        if strategy_recovery_waiting; then reason=strategy_recovery; fi
+        job_wait "$id" "$status" "$reason" || return 1
         return 75
     fi
 }

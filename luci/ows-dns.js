@@ -181,7 +181,12 @@ function migrationPanel(followJob) {
             refresh.disabled = schedule.disabled = busy || managed || !data.prepared || !data.matches;
             takeover.disabled = busy || managed || !data.matches || !data.update || !data.schedule;
             if (data.light_start) {
-                report.textContent = _('Light использует только DNS-список HaGeZi. Для установки требуется 48 МиБ доступной RAM.');
+                report.replaceChildren(E('dl', {}, owsUI.details([
+                    [_('Пресет для установки'), 'HaGeZi Light'],
+                    [_('Фильтрация'), _('Выключена')],
+                    [_('Tachyon Lists'), _('Не выбраны')],
+                    [_('Автообновление'), _('Выключено')]
+                ])), E('p', {}, _('Light использует только доменный список. Для установки требуется 48 МиБ доступной RAM.')));
                 return;
             }
             if (data.fast_enabled && !managed) {

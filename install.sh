@@ -24,7 +24,8 @@ upgrade_ready() {
     [ ! -d /etc/ows/system-handover.pending ] || fail 'Resolve pending system handover before upgrading'
     [ ! -d /etc/ows/network-compat.pending ] || fail 'Resolve pending network handover before upgrading'
     [ ! -d /etc/ows/adblock-live/pending ] || fail 'Resolve pending adblock recovery before upgrading'
-    [ ! -e /etc/ows/doh-live/takeover.pending ] && [ ! -d /etc/ows/doh-live/switch.pending ] ||
+    [ ! -e /etc/ows/doh-live/takeover.pending ] && [ ! -d /etc/ows/doh-live/switch.pending ] &&
+        [ ! -d /etc/ows/doh-live/initialize.pending ] && [ ! -d /etc/ows/steer-live/setup.pending ] ||
         fail 'Resolve pending DoH recovery before upgrading'
 }
 
@@ -37,6 +38,7 @@ adapters/network-compat.sh /usr/lib/ows/network-compat.sh 644
 adapters/network-handover.sh /usr/lib/ows/network-handover.sh 644
 adapters/legacy-cleanup.sh /usr/lib/ows/legacy-cleanup.sh 644
 adapters/queue-locks.sh /usr/lib/ows/queue-locks.sh 644
+adapters/queue-metrics.sh /usr/lib/ows/queue-metrics.sh 644
 adapters/zapret-module.sh /usr/lib/ows/zapret-module.sh 644
 adapters/zapret2-reference.sh /usr/lib/ows/zapret2-reference.sh 644
 modules/zapret2/zapret2-safe.sh /usr/lib/ows/zapret2-safe.sh 755
@@ -48,6 +50,7 @@ adapters/packages.sh /usr/lib/ows/packages.sh 644
 adapters/ows-json.jq /usr/lib/ows/ows-json.jq 644
 adapters/release-install.sh /usr/lib/ows/release-install.sh 644
 adapters/zapret-constructor.sh /usr/lib/ows/zapret-constructor.sh 644
+adapters/zapret-nfqueue.sh /usr/lib/ows/zapret-nfqueue.sh 644
 adapters/zapret-presets.sh /usr/lib/ows/zapret-presets.sh 644
 adapters/dns.sh /usr/lib/ows/dns.sh 644
 adapters/doh.sh /usr/lib/ows/doh.sh 644
@@ -70,6 +73,8 @@ adapters/steer-live.sh /usr/lib/ows/steer-live.sh 644
 adapters/steer-catalog.sh /usr/lib/ows/steer-catalog.sh 644
 adapters/steer-sources.sh /usr/lib/ows/steer-sources.sh 644
 adapters/steer-apply.sh /usr/lib/ows/steer-apply.sh 644
+adapters/steer-setup.sh /usr/lib/ows/steer-setup.sh 644
+adapters/steer-services.conf /usr/lib/ows/steer-services.conf 644
 adapters/steer-merge.jq /usr/lib/ows/steer-merge.jq 644
 adapters/steer-edit.jq /usr/lib/ows/steer-edit.jq 644
 adapters/steer-outputs.json /usr/lib/ows/steer-outputs.json 644

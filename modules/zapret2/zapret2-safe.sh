@@ -61,21 +61,13 @@ check_config() (
         "--lua-init=@$base/lua/zapret-auto.lua" $NFQWS2_OPT
 )
 
-running_main() {
-    local qnum
-    qnum=$(uci -q get zapret2.main.qnum || echo 300)
-    ubus call service list '{"name":"zapret2"}' |
-        jq -e --arg queue "--qnum=$qnum" 'any(.zapret2.instances[]?;
-            .running == true and ((.command // []) | index($queue) != null))' >/dev/null
-}
-
 service_ready() {
     local attempt=0 state
     state=$(uci -q show zapret2) || return 1
     [ "$(printf '%s\n' "$state" | zapret2_active_strategies)" -gt 0 ] || return 0
     while [ "$attempt" -lt 5 ]; do
         sleep 1
-        running_main && return 0
+        zapret2_main_running && return 0
         attempt=$((attempt+1))
     done
     return 1

@@ -18,10 +18,17 @@ steer_catalog_rows() {
 }
 
 steer_catalog_state() {
-    steer_catalog_rows | jq -Rsc '
+    steer_catalog_rows | jq -Rsc --arg small "$(steer_catalog_small_rows | cut -d '|' -f 1)" '
         split("\n") | map(select(length>0) | split("|") |
             {id:.[0], name:.[1], group:(.[8] | if .==null or .=="" then "Встроенные" else . end),
-             description:(.[9] // "")})'
+             description:(.[9] // ""), prepare_small:(.[0] as $id | ($small|split("\n")|index($id))!=null)})'
+}
+
+steer_catalog_small_rows() {
+    [ -f "$edit_root/standalone" ] && [ ! -s "$edit_root/sources/tachyon.plus" ] || return 0
+    steer_catalog_rows | awk -F '|' '
+        $3 ~ /^(svc_(youtube|twitter|instagram|whatsapp)|own_github)[.]lst$/ &&
+        $4=="" && $5=="" && $6=="" && $8==""'
 }
 
 steer_catalog_fetch() {
@@ -32,7 +39,7 @@ steer_catalog_fetch() {
         https://raw.githubusercontent.com/v2fly/domain-list-community/*) ;;
         *) return 1 ;;
     esac
-    ows_vpn_fetch_https "$1" "$2"
+    ows_vpn_fetch_https "$1" "$2" "${OWS_STEER_FETCH_LIMIT:-4194304}"
 }
 
 steer_catalog_text() {
@@ -156,8 +163,33 @@ EOF
         [ -s "$work/catalog-service.json" ]
 )
 
+steer_catalog_use_prepared() (
+    local id=$1 job=$2 work=$3 prepared row label hash source dir
+    case "$job" in ''|*[!0-9-]*) exit 1 ;; esac
+    [ "${#job}" -le 30 ] && [ -n "${OWS_JOB_RESULT:-}" ] || exit 1
+    dir=$(dirname "${OWS_JOB_RESULT%/*}")/$job
+    prepared=$dir/result.json
+    row=$(steer_catalog_small_rows | awk -F '|' -v id="$id" '$1==id {print; exit}')
+    [ -n "$row" ] || exit 1
+    hash=$(printf '%s\n' "$row" | sha256sum); hash=${hash%% *}
+    jq -e '.phase=="done"' "$dir/status.json" >/dev/null &&
+        jq -e --arg id "$id" --arg rev "$edit_revision" --arg hash "$hash" '
+            .kind=="list_preview" and .catalog_id==$id and .revision==$rev and .catalog_hash==$hash
+        ' "$prepared" >/dev/null || exit 1
+    source=$(jq -er '.source | strings' "$prepared") || exit 1
+    case "$source" in domains\|https://raw.githubusercontent.com/*) ;; *) exit 1 ;; esac
+    label=$(printf '%s\n' "$row" | cut -d '|' -f 2)
+    mkdir "$work/lists" && cp "$dir/preview-domains" "$work/lists/preset.dom" || exit 1
+    [ -s "$work/lists/preset.dom" ] && [ "$(wc -c < "$work/lists/preset.dom")" -le 262144 ] || exit 1
+    hash=$(sha256sum "$work/lists/preset.dom"); hash=${hash%% *}
+    jq -e --arg hash "$hash" '.domains_hash==$hash' "$prepared" >/dev/null || exit 1
+    printf '%s\n' "$source" > "$work/lists/preset.dom.source" &&
+        jq -nc --arg id "$id" --arg name "$label" --arg path "$work/lists/preset.dom" \
+            '{id:$id,name:$name,list:{domains_file:[$path]}}' > "$work/catalog-service.json"
+)
+
 steer_list_preview() (
-    steer_editor_locate || { echo 'Черновик недоступен'; exit 1; }
+    steer_editor_locate || { echo 'Манифест недоступен'; exit 1; }
     [ -n "${OWS_JOB_RESULT:-}" ] || exit 1
     mem=$(awk '$1=="MemAvailable:" {print $2}' /proc/meminfo)
     [ "${mem:-0}" -ge 65536 ] || { echo 'Для предпросмотра требуется 64 МиБ доступной RAM'; exit 1; }
@@ -167,14 +199,28 @@ steer_list_preview() (
     work=$(mktemp -d "$job_dir/preview.XXXXXX") || exit 1
     trap 'rm -rf "$work"' EXIT
     trap 'exit 1' HUP INT TERM
+    local catalog_id='' catalog_hash='' domains_hash='' source=''
     case "$1" in
+        small:*)
+            target=${1#small:}
+            catalog_id=${target#*:}
+            [ "${target%:*}" = "$edit_revision" ] || { echo 'Манифест изменился. Обновите вкладку.'; exit 1; }
+            free=$(df -Pk "$job_dir" | awk 'END {print $4}')
+            [ "${free:-0}" -ge 8192 ] || { echo 'Для подготовки списка нужно 8 МиБ свободного места в /tmp.'; exit 1; }
+            row=$(steer_catalog_small_rows | awk -F '|' -v id="$catalog_id" '$1==id {print; exit}')
+            [ -n "$row" ] || { echo 'Этот список готовится по основной очереди.'; exit 1; }
+            catalog_hash=$(printf '%s\n' "$row" | sha256sum); catalog_hash=${catalog_hash%% *}
+            OWS_STEER_FETCH_LIMIT=262144 steer_catalog_stage "$catalog_id" "$work" || exit 1
+            source=$(cat "$work/lists/"*.source) || exit 1
+            jq -c '{name,lists:[.list]}' "$work/catalog-service.json" > "$work/selected.json" || exit 1
+            ;;
         catalog:*)
             steer_catalog_stage "${1#*:}" "$work" || exit 1
             jq -c '{name,lists:[.list]}' "$work/catalog-service.json" > "$work/selected.json" || exit 1
             ;;
         rule:*)
             target=${1#*:}
-            [ "${target%:*}" = "$edit_revision" ] || { echo 'Черновик изменился. Обновите вкладку'; exit 1; }
+            [ "${target%:*}" = "$edit_revision" ] || { echo 'Манифест изменился. Обновите вкладку'; exit 1; }
             jq -ce --argjson index "${target##*:}" '
                 (.lists // {}) as $lists | .rules[$index] | objects |
                 {name:(.name // ""), lists:[(.to | if type=="array" then .[] else . end) |
@@ -220,8 +266,15 @@ steer_list_preview() (
             LC_ALL=C sort -u "$work/$kind.clean" > "$work/$kind" || exit 1
         mv -f "$work/$kind" "$job_dir/preview-$kind" || exit 1
     done
+    if [ -n "$catalog_id" ]; then
+        domains_hash=$(sha256sum "$job_dir/preview-domains") || exit 1
+        domains_hash=${domains_hash%% *}
+    fi
     jq -c --argjson domains "$(wc -l < "$job_dir/preview-domains")" \
         --argjson prefixes "$(wc -l < "$job_dir/preview-prefixes")" --argjson unresolved "$unresolved" '
         {kind:"list_preview", name, domains:$domains, prefixes:$prefixes, unresolved:$unresolved}
-    ' "$work/selected.json" > "$work/result.json" && mv -f "$work/result.json" "$OWS_JOB_RESULT"
+    ' "$work/selected.json" | jq -c --arg id "$catalog_id" --arg rev "$edit_revision" \
+        --arg catalog_hash "$catalog_hash" --arg domains_hash "$domains_hash" --arg source "$source" '
+        if $id=="" then . else . + {catalog_id:$id, revision:$rev, catalog_hash:$catalog_hash, domains_hash:$domains_hash, source:$source} end
+    ' > "$work/result.json" && [ -s "$work/result.json" ] && mv -f "$work/result.json" "$OWS_JOB_RESULT"
 )

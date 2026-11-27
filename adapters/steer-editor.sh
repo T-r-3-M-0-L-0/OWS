@@ -53,22 +53,36 @@ steer_editor_devices() {
 }
 
 steer_editor_state() (
-    if ! steer_editor_locate; then echo '{"error":"Сначала соберите черновик переноса"}'; exit; fi
-    local catalog
+    if ! steer_editor_locate; then echo '{"error":"Сначала подготовьте манифест steer"}'; exit; fi
+    local catalog interfaces='[]' setup=false
     catalog=$(steer_catalog_state) || exit 1
-    steer_editor_devices | jq -c --slurpfile spec "$edit_spec" --slurpfile policy "$edit_policy" \
-        --slurpfile labels /usr/lib/ows/steer-outputs.json --arg rev "$edit_revision" --argjson catalog "$catalog" '
+    if steer_output_setup_available; then
+        setup=true
+        interfaces=$(for path in /sys/class/net/*; do printf '%s\n' "${path##*/}"; done |
+            jq -Rsc 'split("\n") | map(select(length>0 and .!="lo"))') || exit 1
+    fi
+    steer_editor_devices | jq -c --slurpfile spec "$edit_spec" --slurpfile baseline "$edit_base" --slurpfile policy "$edit_policy" \
+        --slurpfile labels /usr/lib/ows/steer-outputs.json --arg rev "$edit_revision" --argjson catalog "$catalog" \
+        --argjson setup "$setup" --argjson interfaces "$interfaces" '
         . as $devices | $spec[0] |
         {
             revision:$rev, devices:$devices, catalog:$catalog,
+            output_setup:$setup, interfaces:($interfaces - (.lan.devices // [])),
             policy:($policy[0] // {mode:"all",devices:[],full:[],full_output:"",exclusions:""}),
             outputs:[.outputs|to_entries[] |
-                {id:.key, label:($labels[0][.key] // .key), kind:.value.kind, protocol:.value.protocol,
+                .key as $key | .value as $value |
+                (if $value.kind=="warp" and ($key|startswith("ows_warp_")) then $key[9:]
+                 elif $value.kind=="interface" and ($key|startswith("ows_tun_")) then $key[8:] else null end) as $alias |
+                {id:$key, label:($labels[0][$key] // (if $alias==null then $key
+                     elif $value.kind=="warp" then "WARP · \($alias)" else "Туннель · \($alias)" end)),
+                 alias:$alias, kind:$value.kind, protocol:$value.protocol, device:$value.device,
+                 count:$value.count, transport:$value.transport,
                  route:(if (.value.kind=="warp" or (.key|startswith("zmwarp") or startswith("zm_warp"))) then "warp"
                         elif .value.kind=="group" or .value.kind=="tunnel" then "vpn"
                         elif (.value.kind|IN("interface","xsteer","awg")) then "tunnel" else .value.kind end),
                  on_fail:(.value.on_fail // "drop"),
                  configured_nodes:(.value.nodes // null),
+                 nodes_pending:(.value.nodes != $baseline[0].outputs[$key].nodes),
                  subscription:(.value.subscription|type=="string" and length>0)}],
             services:[.rules|to_entries[] | select((.value.name // "" | startswith("OWS:"))|not) |
                 (.value.to | if type=="array" then .[0] else . end) as $key |
@@ -82,6 +96,23 @@ steer_editor_state() (
         }'
 )
 
+steer_output_setup_available() {
+    steer_owner >/dev/null || { [ -f "$edit_root/standalone" ] && steer_can_setup; }
+}
+
+steer_output_device_valid() {
+    local dev=$1
+    case "$dev" in ''|lo|.|..|*[!A-Za-z0-9_.:-]*) return 1 ;; esac
+    [ "${#dev}" -le 15 ] && [ -d "/sys/class/net/$dev" ] &&
+        jq -e --arg dev "$dev" 'all(.lan.devices[]?; .!=$dev)' "$edit_spec" >/dev/null
+}
+
+steer_warpbox_ready() {
+    if timeout 8 steer plugin list --json 2>/dev/null |
+        jq -e 'any(.. | objects; .id?=="warpbox" and .state?=="enabled")' >/dev/null; then return 0; fi
+    timeout 45 steer plugin ensure warpbox || { echo 'Не удалось подготовить плагин WARP (warpbox).'; return 1; }
+}
+
 steer_editor_parser() {
     proto=$(jq -er --arg out "$1" '.outputs[$out].protocol | strings' "$edit_spec") || return 1
     case "$proto" in vless|hysteria2|proxy) parser=$proto ;; *) return 1 ;; esac
@@ -91,40 +122,96 @@ steer_editor_parser() {
 }
 
 steer_subscription_nodes() {
-    timeout 12 steer "$parser-nodes" "$subfile" 2>/dev/null | jq -L /usr/lib/ows -ce '
+    local nodes
+    [ -r /usr/lib/ows/ows-json.jq ] || {
+        echo 'Отсутствует модуль jq /usr/lib/ows/ows-json.jq. Восстановите файлы OWS.' >&2
+        return 1
+    }
+    nodes=$(timeout -k 1 12 steer "$parser-nodes" "$subfile" 2>/dev/null | jq -L /usr/lib/ows -ce '
         include "ows-json";
-        [(.nodes|arrays)[] | select((.index|type)=="number" and .index>=0 and .index==(.index|floor)) |
+        .nodes | arrays |
+        [.[] | select((.index|type)=="number" and .index>=0 and .index==(.index|floor)) |
             {index, name:((.name // "") | strip_controls |
-                if contains("://") then "" else .[:120] end)}]'
+                if contains("://") then "" else .[:120] end)}]') && [ -n "$nodes" ] || {
+        echo 'Не удалось разобрать список узлов подписки.' >&2
+        return 1
+    }
+    printf '%s\n' "$nodes"
 }
 
 steer_editor_nodes() (
-    local out=${1%%:*} page=${1#*:}
+    local out=${1%%:*} page=${1#*:} nodes
     if [ "$page" = "$1" ]; then page=1; fi
     case "$page" in ''|0*|*[!0-9]*) echo '{"error":"Некорректная страница"}'; exit ;; esac
     [ "${#page}" -le 5 ] || exit 1
     if ! steer_editor_locate || ! steer_editor_parser "$out"; then
         echo '{"error":"Локальный список узлов недоступен"}'; exit
     fi
-    steer_subscription_nodes | jq -ce --argjson page "$page" '
+    nodes=$(steer_subscription_nodes) || { echo '{"error":"Не удалось разобрать список узлов подписки"}'; exit; }
+    printf '%s\n' "$nodes" | jq -ce --argjson page "$page" '
         {total:length,nodes:.[($page-1)*80:$page*80]}' ||
         echo '{"error":"Не удалось прочитать узлы подписки"}'
 )
 
 steer_probe_node() {
-    timeout 10 steer "$parser-probe" "$subfile" --node "$1" --timeout "$2" 2>/dev/null |
+    timeout -k 1 "$(( $2 + 2 ))" steer "$parser-probe" "$subfile" --node "$1" --timeout "$2" 2>/dev/null |
         jq -ce --argjson index "$1" '
             first(.results[]? | select(.index==$index)) |
             {index, ok:(.ok==true), handshake_ms:(.handshake_ms // null), ttfb_ms:(.ttfb_ms // null)}' ||
         jq -nc --argjson index "$1" '{index:$index,ok:false}'
 }
 
+steer_probe_stamp() (
+    local out=$1 revision=$2 subscription live=none family
+    steer_editor_locate && [ "$edit_revision" = "$revision" ] && steer_editor_parser "$out" || exit 1
+    subscription=$(sha256sum "$subfile") || exit 1
+    if [ -s "$OWS_STEER_SPEC" ]; then live=$(sha256sum "$OWS_STEER_SPEC") || exit 1; fi
+    {
+        printf '%s\n' "$edit_revision" "$subscription" "$live"
+        for family in -4 -6; do
+            ip "$family" rule show 2>/dev/null || :
+            ip "$family" route show table all 2>/dev/null | sed 's/ expires [0-9][0-9]*sec//g' | sort
+        done
+    } | sha256sum | awk '{print $1}'
+)
+
+steer_probe_stale() {
+    if [ -n "${OWS_JOB_RESULT:-}" ]; then jq -nc '{ok:false,stale:true}' > "$OWS_JOB_RESULT" || return 1; fi
+    echo 'Результат устарел: изменилась подписка, манифест или маршрутизация. Повторите проверку.'
+    return 1
+}
+
 steer_editor_probe() (
-    out=${1%%:*}; node=${1#*:}
-    steer_editor_locate && steer_editor_parser "$out" || { echo 'Подписка в черновике недоступна'; exit 1; }
-    steer_subscription_nodes | jq -e --argjson index "$node" 'any(.[]; .index == $index)' >/dev/null ||
+    umask 077
+    local out=${1%%:*} target=${1#*:} node expected before latest digest pinned work=/tmp response memory free nodes
+    node=${target%%:*}
+    expected=${target#*:}
+    steer_editor_locate && steer_editor_parser "$out" || { echo 'Подписка в манифесте недоступна'; exit 1; }
+    if [ "$target" = "$node" ]; then expected=$edit_revision; fi
+    [ "$expected" = "$edit_revision" ] || { steer_probe_stale; exit 1; }
+    before=$(steer_probe_stamp "$out" "$expected") || { steer_probe_stale; exit 1; }
+    digest=$(sha256sum "$subfile") || exit 1
+    if [ -n "${OWS_JOB_RESULT:-}" ]; then work=${OWS_JOB_RESULT%/*}; fi
+    memory=$(awk '$1=="MemAvailable:" {print $2; exit}' /proc/meminfo)
+    free=$(df -Pk "$work" | awk 'END {print $4}')
+    [ "${memory:-0}" -ge 32768 ] && [ "${free:-0}" -ge 8192 ] ||
+        { echo 'Для проверки узла требуется 32 МиБ доступной RAM и 8 МиБ в /tmp.'; exit 1; }
+    pinned=$(mktemp "$work/.probe-sub.XXXXXX") || exit 1
+    trap 'rm -f "$pinned"' EXIT
+    trap 'exit 1' HUP INT TERM
+    if ! (ulimit -f 8192; cp "$subfile" "$pinned") || [ "$(wc -c < "$pinned")" -gt 4194304 ]; then
+        echo 'Не удалось сохранить временную копию подписки размером до 4 МиБ.'
+        exit 1
+    fi
+    latest=$(sha256sum "$pinned") || exit 1
+    [ "${latest%% *}" = "${digest%% *}" ] && [ "$(steer_probe_stamp "$out" "$expected")" = "$before" ] ||
+        { steer_probe_stale; exit 1; }
+    subfile=$pinned
+    nodes=$(steer_subscription_nodes) || exit 1
+    printf '%s\n' "$nodes" | jq -e --argjson index "$node" 'any(.[]; .index == $index)' >/dev/null ||
         { echo 'Узел не найден'; exit 1; }
     response=$(steer_probe_node "$node" 8) || exit 1
+    [ "$(steer_probe_stamp "$out" "$expected")" = "$before" ] || { steer_probe_stale; exit 1; }
     if [ -n "${OWS_JOB_RESULT:-}" ]; then
         printf '%s\n' "$response" > "$OWS_JOB_RESULT"
     fi
@@ -138,38 +225,46 @@ steer_editor_probe() (
 )
 
 steer_editor_probe_all() (
-    local out=$1 nodes index found checked responses working
-    steer_editor_locate && steer_editor_parser "$out" || { echo 'Подписка в черновике недоступна'; exit 1; }
-    nodes=$(steer_subscription_nodes | jq -ce 'select(length>0) | map(.index)') ||
+    local out=$1 nodes index found checked responses working deadline remaining
+    steer_editor_locate && steer_editor_parser "$out" || { echo 'Подписка в манифесте недоступна'; exit 1; }
+    nodes=$(steer_subscription_nodes) || exit 1
+    nodes=$(printf '%s\n' "$nodes" | jq -ce 'select(length>0) | map(.index)') ||
         { echo 'В подписке нет узлов для проверки'; exit 1; }
     found=$(printf '%s\n' "$nodes" | jq -r 'length')
     umask 077
     responses=$(mktemp /tmp/ows-probe.XXXXXX) || exit 1
     trap 'rm -f "$responses"' EXIT
     trap 'exit 1' HUP INT TERM
-    for index in $(printf '%s\n' "$nodes" | jq -r '.[]'); do
-        steer_probe_node "$index" 4 >> "$responses" || exit 1
+    deadline=$(($(queue_clock_ms) + 60000))
+    for index in $(printf '%s\n' "$nodes" | jq -r '.[:64][]'); do
+        remaining=$(( (deadline - $(queue_clock_ms)) / 1000 - 3 ))
+        [ "$remaining" -gt 0 ] || break
+        if [ "$remaining" -gt 4 ]; then remaining=4; fi
+        steer_probe_node "$index" "$remaining" >> "$responses" || exit 1
     done
     checked=$(wc -l < "$responses")
     working=$(awk '/"ok":true/{count++} END{print count+0}' "$responses")
     if [ -n "${OWS_JOB_RESULT:-}" ]; then
         cp "$responses" "${OWS_JOB_RESULT%/*}/preview-nodes" &&
-            jq -nc --argjson total "$found" --argjson working "$working" \
-                '{kind:"node_batch",total:$total,working:$working}' > "$OWS_JOB_RESULT" || exit 1
+            jq -nc --argjson total "$found" --argjson checked "$checked" --argjson working "$working" \
+                '{kind:"node_batch",total:$total,checked:$checked,working:$working}' > "$OWS_JOB_RESULT" || exit 1
     fi
     printf 'Проверено узлов: %s из %s. Ответили: %s.\n' "$checked" "$found" "$working"
+    [ "$checked" -eq "$found" ] || echo 'Достигнут лимит одной пакетной проверки.'
 )
 
 steer_verify_candidate() (
     local workspace=$1 result
-    result=$(timeout 15 steer ctl check < "$workspace/spec.json" 2>/dev/null | jq -er '.code | numbers') ||
-        { echo 'Демон не ответил на проверку черновика'; exit 1; }
-    [ "$result" = 0 ] || { echo "steer отклонил черновик, код $result"; exit 1; }
+    if ! { [ -f "${edit_root:-$workspace}/standalone" ] && steer_can_setup; }; then
+        result=$(timeout 15 steer ctl check < "$workspace/spec.json" 2>/dev/null | jq -er '.code | numbers') ||
+            { echo 'Демон не ответил на проверку манифеста'; exit 1; }
+        [ "$result" = 0 ] || { echo "steer отклонил манифест, код $result"; exit 1; }
+    fi
     mkdir "$workspace/state" || exit 1
     trap 'rm -rf "$workspace/state"' EXIT
-    cp -a /var/lib/steer/. "$workspace/state/" || exit 1
+    [ ! -d /var/lib/steer ] || cp -a /var/lib/steer/. "$workspace/state/" || exit 1
     if ! timeout 18 steer apply --dry-run --spec "$workspace/spec.json" --state-dir "$workspace/state" >/dev/null 2>&1; then
-        echo 'Не удалось скомпилировать правила черновика'
+        echo 'Не удалось скомпилировать правила манифеста'
         exit 1
     fi
 )
@@ -202,13 +297,13 @@ steer_editor_list() {
 
 steer_editor_save() (
     umask 077
-    steer_editor_locate || { echo 'Сначала соберите черновик переноса'; exit 1; }
+    steer_editor_locate || { echo 'Сначала подготовьте манифест steer'; exit 1; }
     [ -s "$1" ] || exit 1
     change=$(jq -er '.type' "$1") || exit 1
     [ "$(jq -r '.revision' "$1")" = "$edit_revision" ] ||
-        { echo 'Черновик изменился. Обновите вкладку'; exit 1; }
+        { echo 'Манифест изменился. Обновите вкладку'; exit 1; }
     count=$(find "$edit_root" -maxdepth 1 -type d -name 'edit.*' | wc -l)
-    [ "$count" -lt 64 ] || { echo 'Заполнено хранилище версий черновика'; exit 1; }
+    [ "$count" -lt 64 ] || { echo 'Хранилище версий манифеста заполнено'; exit 1; }
     workspace=$(mktemp -d "$edit_root/edit.XXXXXX") || exit 1
     committed=0
     trap '[ "$committed" = 1 ] || rm -rf "$workspace"' EXIT
@@ -222,9 +317,10 @@ steer_editor_save() (
         node)
             out=$(jq -r '.output' "$1")
             node=$(jq -er '.node | numbers | select(. == floor and . >= -1 and . <= 86400)' "$1") || exit 1
-            steer_editor_parser "$out" &&
-                steer_subscription_nodes | jq -e --argjson index "$node" '
-                    type=="array" and ($index == -1 or any(.[]; .index==$index))' >/dev/null ||
+            steer_editor_parser "$out" || { echo 'Подписка в манифесте недоступна'; exit 1; }
+            nodes=$(steer_subscription_nodes) || exit 1
+            printf '%s\n' "$nodes" | jq -e --argjson index "$node" '
+                    $index == -1 or any(.[]; .index==$index)' >/dev/null ||
                 { echo 'Узел не найден в локальной подписке'; exit 1; }
             ;;
         service|service_custom)
@@ -241,7 +337,11 @@ steer_editor_save() (
                 (.outputs | has($change[0].output)) and
                 ((.lists // {}) | has($id) | not)
             ' "$edit_spec" >/dev/null || { echo 'Сервис уже добавлен или выход недоступен'; exit 1; }
-            steer_catalog_stage "$id" "$workspace" || exit 1
+            prepared=$(jq -r '.prepared_job // ""' "$1") || exit 1
+            if [ -n "$prepared" ]; then
+                steer_catalog_use_prepared "$id" "$prepared" "$workspace" ||
+                    { echo 'Подготовленный список устарел. Откройте его состав и повторите добавление.'; exit 1; }
+            else steer_catalog_stage "$id" "$workspace" || exit 1; fi
             ;;
         devices|exclusions)
             jq --slurpfile c "$1" '
@@ -252,6 +352,13 @@ steer_editor_save() (
             jq -r '.exclusions // ""' "$workspace/policy.json" > "$workspace/input" || exit 1
             steer_editor_list "$workspace/input" "$workspace/exclude.txt" "$workspace/exclude-ip.txt" 1 ||
                 { echo 'Исключения должны содержать домены, IPv4 или IPv4/CIDR'; exit 1; }
+            ;;
+        output_save|output_remove)
+            steer_output_setup_available || { echo 'Создание выходов доступно в манифесте, которым управляет OWS.'; exit 1; }
+            if [ "$change" = output_save ] && [ "$(jq -r '.kind' "$1")" = interface ]; then
+                steer_output_device_valid "$(jq -er '.device | strings' "$1")" ||
+                    { echo 'Выберите существующий интерфейс, отличный от LAN и loopback.'; exit 1; }
+            fi
             ;;
         connection|settings) ;;
         *) exit 1 ;;
@@ -271,14 +378,17 @@ steer_editor_save() (
             echo 'Этот steer не умеет блокировать QUIC для выбранного выхода, пока его правила используют списки SRS'
         elif grep -q 'torrent policy with srs' "$workspace/error"; then
             echo 'Этот steer не поддерживает правила для торрентов со списками SRS'
+        elif grep -q 'output still referenced' "$workspace/error"; then
+            echo 'Выход ещё используется. Сначала поменяйте маршрут сервиса или другой выход, который на него ссылается.'
         else
             echo 'Выбранное действие или параметры не поддерживаются'
         fi
         exit 1
     fi
+    if [ "$change" = output_save ] && [ "$(jq -r '.kind' "$1")" = warp ]; then steer_warpbox_ready || exit 1; fi
     steer_verify_candidate "$workspace" || exit 1
     rm -f "$workspace/input" "$workspace/error" "$workspace/catalog-service.json"
     steer_publish_edit "$workspace" || exit 1
     committed=1
-    echo 'Черновик сохранён. Схема steer и компиляция правил проверены.'
+    echo 'Манифест сохранён. Схема steer и компиляция правил проверены.'
 )

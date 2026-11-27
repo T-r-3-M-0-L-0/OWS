@@ -3,7 +3,7 @@
 TGWS_PROXY_INIT=/etc/init.d/tg-ws-proxy
 
 tgws_proxy_running() {
-    ubus -S call service list '{"name":"tg-ws-proxy"}' 2>/dev/null |
+    ubus -t 3 -S call service list '{"name":"tg-ws-proxy"}' 2>/dev/null |
         jsonfilter -e '@["tg-ws-proxy"].instances.*.running' | grep -Fxq true
 }
 

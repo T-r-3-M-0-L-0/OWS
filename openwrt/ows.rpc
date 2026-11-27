@@ -68,6 +68,7 @@ ows_vpn() (
     fi
     case "$action" in
         diagnose) command=diag ;;
+        setup) command=setup ;;
         inspect_subscription) command=check:$target ;;
         prepare_migration) command=prepare-migration ;;
         probe_node) command=probe:$target ;;
@@ -334,6 +335,7 @@ case "$1:$2" in
                 if [ "$ok" = true ] || [ "$ok" = false ]; then
                     json_add_object probe
                     if [ "$ok" = true ]; then json_add_boolean ok 1; else json_add_boolean ok 0; fi
+                    if [ "$(jsonfilter -i "$result" -e '@.stale' 2>/dev/null)" = true ]; then json_add_boolean stale 1; fi
                     for metric in handshake_ms ttfb_ms; do
                         value=$(jsonfilter -i "$result" -e "@.$metric" 2>/dev/null)
                         case "$value" in ''|*[!0-9]*) ;; *) json_add_int "$metric" "$value" ;; esac

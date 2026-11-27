@@ -81,9 +81,10 @@ enqueue() (
             esac
             ;;
         doh)
-            [ "$#" = 1 ] || fail 'Usage: ows doh install|check|prepare|verify|takeover|test-switch|watch|configure:CURRENT:NEW'
+            [ "$#" = 1 ] || fail 'Usage: ows doh ACTION'
             case "$1" in
-                install|check|prepare|verify|takeover|test-switch|watch) ;;
+                install|check|prepare|verify|takeover|test-switch|watch|auto:on|auto:off) ;;
+                initialize:*) . "$LIB/doh-live.sh"; doh_policy_rows "${1#initialize:}" >/dev/null || fail 'Invalid DoH chain' ;;
                 configure:*) . "$LIB/doh-live.sh"; doh_configure_valid "${1#configure:}" || fail 'Invalid DoH chain' ;;
                 *) fail 'Unknown DoH action' ;;
             esac
@@ -160,6 +161,10 @@ enqueue() (
     fi
     printf '{"job":"%s","phase":"queued","updated":%s}\n' "$id" "$2" > "$JOBS/$id/status.json"
     printf '%s queued\n' "$2" > "$JOBS/$id/events"
+    if diagnostic_job "$kind" "$1"; then
+        . "$LIB/queue-metrics.sh"
+        queue_clock_ms > "$JOBS/$id/enqueued.ms" || :
+    fi
     : > "$QUEUE/$id"
     printf '%s\n' "$id"
 )
@@ -209,7 +214,7 @@ process() (
         return
     fi
     publish "$id" applying || return 1
-    if apply_config "$PENDING"; then
+    if apply_config "$PENDING" >> "$job/output" 2>&1; then
         : > "$PENDING/committed" || return 1
         recover
         return
@@ -228,6 +233,9 @@ process_module() {
         (
             export OWS_JOB_RESULT="$JOBS/$id/result.json"
             case "$kind:$action" in
+                steer:list-preview:small:*)
+                    command -v curl >/dev/null || { echo 'Для подготовки списка нужен curl.'; exit 1; }
+                    ;;
                 adblock:refresh*|adblock:configure:*|adblock:enable-light|adblock:edit|\
                 steer:refresh-*|steer:test-draft-lists|steer:list-preview:*|steer:edit)
                     . "$LIB/packages.sh"
@@ -238,7 +246,10 @@ process_module() {
                 stgws) stgws_execute "$action" ;;
                 install-module)
                     . "$LIB/release-install.sh"
-                    ows_install_release "$action"
+                    if [ "$action" = steer ]; then
+                        . "$LIB/vpn.sh"
+                        ows_vpn_load steer "$LIB" && steer_install_setup
+                    else ows_install_release "$action"; fi
                     ;;
                 cleanup)
                     . "$LIB/legacy-cleanup.sh"
@@ -256,11 +267,13 @@ process_module() {
                     . "$LIB/doh.sh"
                     . "$LIB/doh-live.sh"
                     case "$action" in
-                        install) . "$LIB/packages.sh"; ows_install_repo_packages https-dns-proxy luci-app-https-dns-proxy ;;
+                        install) . "$LIB/packages.sh"; doh_install_package ;;
                         check) doh_check ;;
                         prepare) ! doh_owned && doh_prepare ;;
                         verify) ! doh_owned && doh_verify ;;
                         takeover) doh_takeover ;;
+                        initialize:*) doh_initialize "${action#initialize:}" ;;
+                        auto:*) doh_set_auto "${action#auto:}" ;;
                         configure:*) doh_configure "${action#configure:}" ;;
                         watch) doh_watch ;;
                         test-switch) doh_test_switch ;;
@@ -317,28 +330,54 @@ process_module() {
         3) result=rollback_failed; critical "$id" rollback_failed ;;
         *) result=operation_failed ;;
     esac
+    if [ -n "${metric_sampler:-}" ]; then queue_profile_finish || :; fi
     publish "$id" "$result" || return 1
     [ "$outcome" != 3 ]
 }
 
 diagnostic_job() {
-    case "$1" in dns|doh|netshift|tg-ws-proxy) ;; *) return 1 ;; esac
-    case "$1:$(cat "$JOBS/$2/action" 2>/dev/null)" in
-        dns:check|dns:check:*|doh:check|netshift:diag|tg-ws-proxy:check) return 0 ;;
+    case "$1:$2" in
+        dns:check|dns:check:*|doh:check|netshift:diag|tg-ws-proxy:check|steer:probe:*|steer:list-preview:small:*) return 0 ;;
         *) return 1 ;;
     esac
 }
 
 process_diagnostic() (
-    local id=$1 kind=$2 status action result
-    exec 6>"$RUN/diagnostic.lock"
+    local id=$1 kind=$2 action=$3 lane=${4:-primary} partner=${5:-} status result
+    local active class paired_class budget metric_sampler=''
+    exec 4>"$RUN/diagnostic-admission.lock"
+    flock -x 4 || exit 1
+    if [ "$lane" = pair ]; then
+        if (exec 5>"$RUN/diagnostic.lock"; flock -n 5); then exit 0; fi
+        read -r active paired_class < "$RUN/diagnostic-primary.job" || exit 0
+        [ "$partner" = "$active" ] || exit 0
+        class=$(diagnostic_pair_class "$kind" "$action") || exit 0
+        [ -n "$paired_class" ] && [ "$class" != "$paired_class" ] || exit 0
+        exec 6>"$RUN/diagnostic-pair.lock"
+    else
+        if ! (exec 5>"$RUN/diagnostic-pair.lock"; flock -n 5); then exit 0; fi
+        exec 6>"$RUN/diagnostic.lock"
+    fi
     flock -n 6 || exit 0
     [ -f "$QUEUE/$id" ] || exit 0
     status=$(cat "$JOBS/$id/status.json" 2>/dev/null || :)
     case "$status" in
         *'"phase":"queued"'*|*'"phase":"waiting"'*)
-            action=$(cat "$JOBS/$id/action") || exit 1
+            if doh_recovery_waiting; then job_wait "$id" "$status" dns_recovery; exit $?; fi
+            if stgws_probes_running; then job_wait "$id" "$status" stgws_probe; exit $?; fi
+            if [ "$lane" = pair ] && ! budget=$(diagnostic_pair_budget); then
+                job_wait "$id" "$status" "$budget"
+                exit $?
+            fi
             if guard_queued_job "$id" "$status" "$kind" "$action"; then
+                if [ "$lane" = primary ]; then
+                    class=$(diagnostic_pair_class "$kind" "$action" || :)
+                    printf '%s %s\n' "$id" "$class" > "$RUN/diagnostic-primary.job" || exit 1
+                fi
+                exec 4>&-
+                trap 'queue_profile_stop_sampler' EXIT
+                trap 'exit 1' HUP INT TERM
+                queue_profile_start "$id" "$lane" || :
                 process_module "$id" "$kind" || exit 1
             else
                 result=$?
@@ -353,21 +392,58 @@ process_diagnostic() (
 )
 
 diagnostic_worker() {
-    local ticket id kind
+    local ticket id kind action class primary_pid='' pair_pid='' primary_id='' primary_class=''
+    local chosen_id chosen_kind chosen_action chosen_class after_id=''
     prepare
     . "$LIB/queue-locks.sh"
+    . "$LIB/queue-metrics.sh"
     exec 9>"$RUN/diagnostic-worker.lock"
     flock -n 9 || fail 'Diagnostic worker already running'
+    trap 'for child in $primary_pid $pair_pid; do kill "$child" 2>/dev/null || :; done; wait; exit 0' HUP INT TERM
     while :; do
+        if [ -n "$primary_pid" ] && ! kill -0 "$primary_pid" 2>/dev/null; then
+            wait "$primary_pid" || return 1
+            if [ -f "$QUEUE/$primary_id" ]; then after_id=$primary_id; else after_id=''; fi
+            primary_pid=''
+        fi
+        if [ -n "$pair_pid" ] && ! kill -0 "$pair_pid" 2>/dev/null; then
+            wait "$pair_pid" || return 1
+            pair_pid=''
+        fi
+        if [ -n "$pair_pid" ] || { [ -n "$primary_pid" ] && [ -z "$primary_class" ]; }; then sleep 1; continue; fi
+        chosen_id=''
         for ticket in "$QUEUE"/*; do
             [ -f "$ticket" ] || continue
             id=${ticket##*/}
+            if [ -n "$primary_pid" ] && [ "$id" = "$primary_id" ]; then continue; fi
+            if [ -z "$primary_pid" ] && [ -n "$after_id" ] && ! [ "$id" \> "$after_id" ]; then continue; fi
             kind=$(cat "$JOBS/$id/kind" 2>/dev/null || :)
-            if diagnostic_job "$kind" "$id"; then
-                process_diagnostic "$id" "$kind" 9>&- || return 1
+            action=$(cat "$JOBS/$id/action" 2>/dev/null || :)
+            diagnostic_job "$kind" "$action" || continue
+            class=$(diagnostic_pair_class "$kind" "$action" || :)
+            if [ -n "$primary_pid" ]; then
+                [ -n "$class" ] && [ "$class" != "$primary_class" ] || continue
+                process_diagnostic "$id" "$kind" "$action" pair "$primary_id" 9>&- &
+                pair_pid=$!
+                break
+            elif [ -z "$chosen_id" ]; then
+                chosen_id=$id; chosen_kind=$kind; chosen_action=$action; chosen_class=$class
+                [ -n "$chosen_class" ] || break
+            elif [ -n "$class" ] && [ "$class" != "$chosen_class" ]; then
+                process_diagnostic "$chosen_id" "$chosen_kind" "$chosen_action" 9>&- &
+                primary_pid=$!; primary_id=$chosen_id; primary_class=$chosen_class
+                process_diagnostic "$id" "$kind" "$action" pair "$primary_id" 9>&- &
+                pair_pid=$!
+                chosen_id=''
+                break
             fi
         done
-        sleep 3
+        if [ -n "$chosen_id" ]; then
+            process_diagnostic "$chosen_id" "$chosen_kind" "$chosen_action" 9>&- &
+            primary_pid=$!; primary_id=$chosen_id; primary_class=$chosen_class
+        fi
+        if [ -z "$primary_pid$pair_pid" ]; then after_id=''; fi
+        if [ -n "$primary_pid$pair_pid" ]; then sleep 1; else sleep 3; fi
     done
 }
 
@@ -394,11 +470,11 @@ writer_pass() {
         [ -f "$ticket" ] || continue
         id=${ticket##*/}
         kind=$(cat "$JOBS/$id/kind" 2>/dev/null || :)
-        if diagnostic_job "$kind" "$id"; then
-            if [ "$pass" = once ]; then process_diagnostic "$id" "$kind" 9>&- || return 1; fi
+        action=$(cat "$JOBS/$id/action" 2>/dev/null || :)
+        if diagnostic_job "$kind" "$action"; then
+            if [ "$pass" = once ]; then process_diagnostic "$id" "$kind" "$action" 9>&- || return 1; fi
             continue
         fi
-        action=$(cat "$JOBS/$id/action" 2>/dev/null || :)
         if priority_job "$kind" "$action"; then
             [ "$pass" = priority ] || continue
         elif [ "$pass" = priority ]; then
@@ -434,7 +510,7 @@ recover_worker() {
     if [ -r "$LIB/doh-live.sh" ]; then
         . "$LIB/doh.sh"
         . "$LIB/doh-live.sh"
-        doh_takeover_recover && doh_recover_switch || fail 'Pending DoH transaction needs recovery'
+        doh_initialize_recover && doh_takeover_recover && doh_recover_switch || fail 'Pending DoH transaction needs recovery'
     fi
     if [ -r "$LIB/adblock-live.sh" ]; then
         . "$LIB/adblock-migration.sh"
@@ -452,6 +528,7 @@ worker() {
     exec 9>"$RUN/worker.lock"
     flock -n 9 || fail 'Worker already running'
     . "$LIB/queue-locks.sh"
+    . "$LIB/queue-metrics.sh"
     . "$LIB/zapret2.sh"
     if [ -r "$LIB/stgws.sh" ]; then . "$LIB/stgws.sh"; fi
     for dep in uci cmp pgrep; do command -v "$dep" >/dev/null || fail "Missing dependency: $dep"; done
@@ -477,6 +554,9 @@ worker() {
         if [ -r "$LIB/stgws.sh" ] && [ "$(date +%s)" -ge "${next_stgws_tick:-0}" ]; then
             stgws_tick || :
             next_stgws_tick=$(($(date +%s) + 60))
+        fi
+        if [ -f /etc/ows/doh-live/auto ] && [ "$(date +%s)" -ge "${next_doh_tick:-0}" ]; then
+            enqueue doh watch >/dev/null && next_doh_tick=$(($(date +%s) + 120))
         fi
         if command -v adblock_live_ensure >/dev/null && [ "$(date +%s)" -ge "${next_adblock_tick:-0}" ] &&
             run_maintenance adblock_live_ensure; then
@@ -551,7 +631,7 @@ case "${1:-}" in
         shift
         if [ "${1:-}" = --diagnostic ]; then diagnostic_worker; else worker "$@"; fi
         ;;
-    status|log|output)
+    status|log|output|metrics)
         if [ "${1:-}" = status ] && [ "$#" = 1 ]; then
             if [ -r "$RUN/latest.json" ]; then cat "$RUN/latest.json"; else echo '{"phase":"idle"}'; fi
         else
@@ -559,6 +639,7 @@ case "${1:-}" in
             case "$1" in
                 log) cat "$JOBS/$2/events" ;;
                 output) [ ! -f "$JOBS/$2/output" ] || tail -c 8192 "$JOBS/$2/output" ;;
+                metrics) cat "$JOBS/$2/metrics.json" ;;
                 *) cat "$JOBS/$2/status.json" ;;
             esac
         fi
@@ -573,6 +654,6 @@ case "${1:-}" in
                 exit
             fi
         fi
-        fail 'Usage: ows apply FILE | MODULE ACTION | status [JOB] | log JOB | output JOB'
+        fail 'Usage: ows apply FILE | MODULE ACTION | status [JOB] | log JOB | output JOB | metrics JOB'
         ;;
 esac

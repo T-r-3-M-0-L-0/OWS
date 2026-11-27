@@ -80,6 +80,7 @@ function toolAction(followJob, action) {
             try { message = JSON.parse(message).error || message; } catch (_) {}
             throw new Error(message || _('Действие завершилось с ошибкой.'));
         }
+        return result;
     });
 }
 
@@ -399,7 +400,7 @@ return baseclass.extend({
     nfqueue: function(followJob, onApplied) {
         var table = E('div'), feedback = owsUI.feedback(), state = {}, busy = false;
         var optimize = button(_('Оптимизировать NFQUEUE'), function() {
-            if (window.confirm(_('Оставить порты включённых стратегий, сохранить откат и перезапустить Zapret2?')))
+            if (window.confirm(_('Рассчитать фильтры по портам включённых стратегий и перезапустить Zapret2, если они изменятся?')))
                 submit('nfq-optimize');
         });
         var rollback = button(_('Откатить NFQUEUE'), function() {
@@ -423,8 +424,8 @@ return baseclass.extend({
             busy = true;
             controls();
             feedback.start(_('Ставим изменение NFQUEUE в очередь…'));
-            return toolAction(followJob, action).then(function() {
-                feedback.show(action === 'nfq-optimize' ? _('Фильтры обновлены.') : _('Фильтры восстановлены.'));
+            return toolAction(followJob, action).then(function(result) {
+                feedback.show(action === 'nfq-optimize' ? _('Оптимизация завершена.') : _('Фильтры восстановлены.'), result.output);
                 onApplied();
             }).catch(function(error) { feedback.show(error.message); }).finally(function() { busy = false; return load(); });
         }

@@ -58,7 +58,7 @@ return baseclass.extend({
                         notice.textContent = _('Не удалось прочитать журнал задания');
                         if (onResult) onResult({output:notice.textContent}, 'operation_failed');
                     }).finally(function() { busy = false; });
-                    if ((change && result.phase === 'done') || ['prepare_migration', 'check_handover', 'refresh_draft_subscription',
+                    if ((change && result.phase === 'done') || ['setup', 'prepare_migration', 'check_handover', 'refresh_draft_subscription',
                         'refresh_live_subscription', 'refresh_live_lists', 'test_draft_lists', 'takeover', 'apply_draft'].indexOf(action) >= 0) {
                         configEditor.refresh();
                         load();
@@ -78,11 +78,11 @@ return baseclass.extend({
             return node;
         }
 
-        function draftPanel(editable) {
+        function draftPanel(editable, outputName) {
             draftActions.replaceChildren();
             if (!editable) return;
-            var summary = E('p', {'aria-live':'polite'});
-            var apply = E('button', {type:'button', class:'cbi-button cbi-button-action'}, _('Применить черновик'));
+            var summary = E('div', {'aria-live':'polite'});
+            var apply = E('button', {type:'button', class:'cbi-button cbi-button-action'}, _('Применить манифест'));
             apply.disabled = true;
             var checkedRevision;
             var preview = E('button', {type:'button', class:'cbi-button'}, _('Проверить изменения'));
@@ -93,11 +93,11 @@ return baseclass.extend({
                 summary.textContent = _('Читаем текущую версию…');
                 info(entry.id).then(function(current) {
                     if (!current.draft_apply || !current.draft_apply.revision)
-                        throw new Error(_('Применение черновика недоступно.'));
+                        throw new Error(_('Применение манифеста недоступно.'));
                     submit('preview_draft', current.draft_apply.revision, null, function(detail, phase) {
                         var report = detail.result;
                         if (phase !== 'done' || !report || report.kind !== 'draft_preview') {
-                            summary.textContent = detail.output || _('Черновик не прошёл проверку.');
+                            summary.textContent = detail.output || _('Манифест не прошёл проверку.');
                             return;
                         }
                         var labels = {lists:_('списки'), rules:_('правила'), outputs:_('выходы'),
@@ -107,14 +107,19 @@ return baseclass.extend({
                         summary.textContent = report.changes.length ?
                             _('Изменятся разделы') + ' · ' + report.changes.map(function(section) {
                                 return labels[section] || section;
-                            }).join(', ') : _('Рабочая конфигурация совпадает с черновиком.');
+                            }).join(', ') : _('Рабочая конфигурация совпадает с настроенным манифестом.');
+                        if (Array.isArray(report.node_changes) && report.node_changes.length)
+                            summary.appendChild(E('ul', {}, report.node_changes.map(function(change) {
+                                return E('li', {}, outputName(change.id) + ' · ' + editor.configuredNodesLabel(change.before) +
+                                    ' → ' + editor.configuredNodesLabel(change.after));
+                            })));
                     });
                 }).catch(function(error) {
                     summary.textContent = error.message || _('Не удалось прочитать состояние.');
                 }).finally(function() { preview.disabled = false; });
             });
             apply.addEventListener('click', function() {
-                if (busy || !checkedRevision || !window.confirm(_('Применить проверенный черновик к рабочей конфигурации?'))) return;
+                if (busy || !checkedRevision || !window.confirm(_('Применить проверенный манифест?'))) return;
                 apply.disabled = true;
                 submit('apply_draft', checkedRevision, null);
             });
@@ -169,7 +174,7 @@ return baseclass.extend({
                 E('div', {class:'ows-actions'}, [reveal]),
                 currentField,
                 E('p', {}, config.live ? _('Изменения применяются к рабочей подписке и расписанию.') :
-                    _('Изменения сохраняются в черновике.')),
+                    _('Изменения записываются в манифест.')),
                 E('label', {class:'ows-field'}, [E('span', {}, _('Ссылка подписки')), input]),
                 config.can_reset_pins ? E('label', {}, [reset, ' ',
                     _('Разрешить автоматический выбор, если закреплённого узла нет в новой подписке')]) : '',
@@ -345,9 +350,12 @@ return baseclass.extend({
             var handover = data.handover || {};
             var native = template.native;
             var showNative = !!(native && (!native.visible || native.visible(data)));
-            mountTabs(ui, abilities, hasSubscription, !!handover.ownership_transferred, showNative);
+            mountTabs(ui, abilities, hasSubscription, !!handover.ownership_transferred, showNative, data);
             status.replaceChildren.apply(status, statusPanel(data, outputName, abilities.diagnose));
-            draftPanel(!!data.draft_apply);
+            if (abilities.setup) status.appendChild(button(_('Подготовить чистые настройки'), 'setup', true));
+            if (data.standalone_draft && !data.configured)
+                status.appendChild(E('p', {}, _('Чтобы запустить маршрутизацию, добавьте сервис, проверьте изменения и нажмите «Применить манифест».')));
+            draftPanel(!!data.draft_apply, outputName);
             listActions.replaceChildren((abilities.refresh_live_lists || (abilities.refresh_live && handover.ownership_transferred)) ?
                 button(_('Обновить рабочие списки'), 'refresh_live_lists', true) : '');
             if (hasSubscription) subscriptions.replaceChildren(
@@ -356,10 +364,11 @@ return baseclass.extend({
                 E('p', {}, data.previous_manager ?
                     _('Обновлением подписки управляет прежняя панель') + ' · ' + data.previous_manager :
                     _('Проверка разбирает локальный список узлов и показывает результат парсера.')),
-                table([_('Выход'), _('Протокол'), _('Проверка списка')], entries.filter(function(item) {
+                table([_('Выход'), _('Протокол'), _('Применённый выбор'), _('Узел в работе'), _('Проверка списка')], entries.filter(function(item) {
                     return item.subscription;
                 }).map(function(item) {
                     return [outputName(item.id), item.protocol || '—',
+                        editor.configuredNodesLabel(item.configured_nodes), editor.activeNodesLabel(item.active_nodes, item, data),
                         button(_('Проверить узлы'), 'inspect_subscription', abilities.inspect_subscriptions && item.can_check, item.id)];
                 }), _('Подписки в конфигурации не найдены'))
             );
@@ -397,22 +406,22 @@ return baseclass.extend({
             var subscription = handover.subscription;
             var lists = handover.lists;
             migration.replaceChildren(
-                E('p', {}, draft.validated ? _('Черновик проверен ядром') : _('Проверенный черновик пока отсутствует')),
+                E('p', {}, draft.validated ? _('Манифест переноса проверен ядром') : _('Манифест переноса ещё не проверен')),
                 draft.prepared ? E('dl', {}, [
-                    E('dt', {}, _('Черновик')), E('dd', {}, draft.draft),
+                    E('dt', {}, _('Манифест переноса')), E('dd', {}, draft.draft),
                     E('dt', {}, _('Скопировано файлов')), E('dd', {}, String(draft.files)),
                     E('dt', {}, _('Фоновые задания прежней панели')), E('dd', {}, String(draft.legacy_jobs))
-                ]) : E('p', {}, _('Импорт создаёт копию конфигурации для проверки.')),
+                ]) : E('p', {}, _('Импорт создаёт манифест переноса из текущей конфигурации.')),
                 E('h4', {}, _('Передача управления')),
                 check ? E('ul', {}, [
-                    E('li', {}, handover.recheck ? _('Черновик изменился. Повторите проверку.') : _('Черновик прошёл последнюю проверку.')),
+                    E('li', {}, handover.recheck ? _('Манифест изменился. Повторите проверку.') : _('Манифест прошёл последнюю проверку.')),
                     E('li', {}, check.source_match ? _('Рабочие файлы совпали со снимком импорта.') : _('Рабочие файлы изменились после импорта.')),
-                    E('li', {}, check.same_rules ? _('Скомпилированные правила совпали.') : _('Правила в черновике отличаются от рабочих.')),
+                    E('li', {}, check.same_rules ? _('Скомпилированные правила совпали.') : _('Правила в манифесте отличаются от рабочих.')),
                     E('li', {}, _('Активные задания прежней панели') + ' · ' + check.legacy_jobs)
                 ]) : E('p', {}, _('Проверка готовности ещё не запускалась')),
                 E('p', {}, subscription ?
-                    _('Свежая подписка проверена в черновике. Выходов') + ' · ' + subscription.outputs :
-                    _('Обновление подписки в черновике ещё не запускалось')),
+                    _('Подписка в манифесте проверена. Выходов') + ' · ' + subscription.outputs :
+                    _('Подписка в манифесте ещё не обновлялась')),
                 E('p', {}, lists ? _('Источники списков проверены') + ' · ' + lists.files :
                     _('Обновление списков ещё не проверено')),
                 E('p', {}, handover.ownership_transferred ?
@@ -422,8 +431,8 @@ return baseclass.extend({
                     button(_('Обновить рабочие списки'), 'refresh_live_lists', abilities.refresh_live),
                     button(_('Обновить рабочую подписку'), 'refresh_live_subscription', abilities.refresh_live)
                 ] : [
-                    button(_('Собрать черновик заново'), 'prepare_migration', abilities.prepare_migration),
-                    button(_('Обновить подписку в черновике'), 'refresh_draft_subscription', abilities.refresh_draft_subscription),
+                    button(_('Пересобрать манифест переноса'), 'prepare_migration', abilities.prepare_migration),
+                    button(_('Обновить подписку в манифесте'), 'refresh_draft_subscription', abilities.refresh_draft_subscription),
                     button(_('Проверить обновление списков'), 'test_draft_lists', abilities.test_draft_lists),
                     button(_('Проверить готовность к передаче'), 'check_handover', abilities.check_handover),
                     button(_('Передать управление OWS'), 'takeover', abilities.takeover)
@@ -431,8 +440,8 @@ return baseclass.extend({
             );
         }
 
-        function mountTabs(ui, abilities, hasSubscription, migrated, showNative) {
-            configEditor.configure(ui, abilities);
+        function mountTabs(ui, abilities, hasSubscription, migrated, showNative, liveState) {
+            configEditor.configure(ui, abilities, liveState);
             var migrationVisible = ui.migration === true && !migrated;
             var layout = JSON.stringify([ui.editor || [], ui.plugins === true, migrationVisible, ui.write_mode, hasSubscription, showNative]);
             if (currentLayout === layout) return;

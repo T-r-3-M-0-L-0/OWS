@@ -63,7 +63,7 @@ zapret2_reference_luci() {
 
 zapret2_reference_resources() {
     local prefix=$1 directory=$2 file name target
-    [ ! -L "$directory" ] && mkdir -p "$directory" || return 1
+    [ ! -L "$directory" ] && (umask 022; mkdir -p "$directory") || return 1
     for file in "$LIB"/"$prefix"*; do
         name=${file##*/}
         target=$directory/${name#"$prefix"}

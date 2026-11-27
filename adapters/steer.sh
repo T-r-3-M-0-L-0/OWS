@@ -8,13 +8,14 @@ OWS_STEER_SPEC=/etc/steer/spec.json
 . /usr/lib/ows/steer-catalog.sh
 . /usr/lib/ows/steer-sources.sh
 . /usr/lib/ows/steer-apply.sh
+. /usr/lib/ows/steer-setup.sh
 
-steer_recover() { steer_live_recover && steer_apply_recover; }
+steer_recover() { steer_initial_recover && steer_live_recover && steer_apply_recover; }
 steer_subscription_url() { steer_subscription_status reveal; }
 
 steer_action_allowed() {
     case "$1" in
-        diag|prepare-migration|edit|check-handover|refresh-draft-subscription|\
+        diag|setup|prepare-migration|edit|check-handover|refresh-draft-subscription|\
         test-draft-lists|takeover|refresh-live-lists|refresh-live-subscription|import-sources) return 0 ;;
         preview-draft:*|apply-draft:*)
             local revision=${1#*:}
@@ -23,9 +24,15 @@ steer_action_allowed() {
             ;;
         probe:*)
             local selection=${1#probe:}
-            local name=${selection%%:*} index=${selection#*:}
+            local name=${selection%%:*} target=${selection#*:} index revision
+            index=${target%%:*}
+            revision=${target#*:}
+            if [ "$target" != "$index" ]; then
+                case "$revision" in *[!a-f0-9]*) return 1 ;; esac
+                [ "${#revision}" -eq 64 ] || return 1
+            fi
             case "$name" in ''|-*|*[!A-Za-z0-9_-]*) return 1 ;; esac
-            case "$index" in ''|*[!0-9]*) return 1 ;; esac
+            case "$index" in ''|0[0-9]*|*[!0-9]*) return 1 ;; esac
             [ "${#name}" -le 64 ] && [ "${#index}" -le 5 ]
             ;;
         check:*|probe-all:*)
@@ -37,6 +44,13 @@ steer_action_allowed() {
             local id=${1#list-preview:catalog:}
             case "$id" in ''|*[!A-Za-z0-9_-]*) return 1 ;; esac
             [ "${#id}" -le 80 ]
+            ;;
+        list-preview:small:*)
+            local selection=${1#list-preview:small:}
+            local rev=${selection%%:*} id=${selection#*:}
+            case "$rev" in *[!a-f0-9]*) return 1 ;; esac
+            case "$id" in ''|*[!A-Za-z0-9_-]*) return 1 ;; esac
+            [ "${#rev}" -eq 64 ] && [ "${#id}" -le 80 ]
             ;;
         list-preview:rule:*)
             local rule=${1#list-preview:rule:}
@@ -80,13 +94,17 @@ steer_info() {
     fi
     local spec=0
     [ ! -s "$OWS_STEER_SPEC" ] || spec=1
-    local migration handover subscription draft_apply
+    local migration handover subscription draft_apply setup=false standalone_draft=false
     migration=$(steer_migration_report)
     handover=$(steer_handover_state)
     subscription=$(steer_subscription_status)
     draft_apply=$(steer_apply_state)
+    if steer_editor_locate && [ -f "$edit_root/standalone" ]; then standalone_draft=true
+    elif steer_can_setup && [ ! -e "$OWS_STEER_MIGRATIONS/latest" ]; then setup=true; fi
     {
-        if [ "$spec" = 1 ]; then cat "$OWS_STEER_SPEC"; else echo '{}'; fi
+        if [ "$spec" = 1 ]; then cat "$OWS_STEER_SPEC"
+        elif [ "$standalone_draft" = true ]; then jq -c '{lan}' "$edit_spec"
+        else echo '{}'; fi
         printf '\n'
         if [ "$running" = 1 ]; then
             timeout 5 steer ctl status 2>/dev/null | jq -ce 'select(.code==0) | .stdout | fromjson | objects' || echo null
@@ -97,6 +115,7 @@ steer_info() {
         --argjson spec "$spec" --argjson diag "$diag" --argjson vless "$vless" --argjson hy2 "$hy2" --argjson proxy "$proxy" \
         --argjson migration "$migration" --argjson handover "$handover" --argjson subscription "$subscription" \
         --argjson draft_apply "$draft_apply" \
+        --argjson setup "$setup" --argjson standalone_draft "$standalone_draft" \
         --slurpfile labels /usr/lib/ows/steer-outputs.json '
         include "ows-json";
         def token:
@@ -110,6 +129,17 @@ steer_info() {
             type=="array" and length>0;
         def display_name:
             strings | strip_controls | .[:100] | select(length>0);
+        def node_index:
+            numbers | select(.>=0 and .==floor);
+        def daemon_nodes($actual):
+            ($actual.vless // $actual.hysteria2 // $actual.proxy // {}) as $tunnel |
+            [($tunnel.active // [])[]? | objects |
+                {index:([.index|node_index][0]), name:([.name|display_name|select(contains("://")|not)][0])} |
+                select(.index!=null or .name!=null)] as $active |
+            if $actual.up!=true then [] elif ($active|length)>0 then $active else
+                [$tunnel.node | {index:([node_index][0]), name:([display_name|select(contains("://")|not)][0])} |
+                    select(.index!=null or .name!=null)]
+            end;
         def dns_endpoint:
             [strings | url_parts |
              {scheme:.scheme, host:(.authority | split("@")[-1] |
@@ -120,12 +150,13 @@ steer_info() {
             schema: 1,
             ui: {
                 editor: ["connections","nodes","services","devices","exclusions","settings"],
-                plugins:true, migration:true, write_mode:"draft"
+                plugins:true, migration:($spec == 1 and $managed), write_mode:"draft"
             },
             installed: ($installed == 1), running: ($running == 1), version: $version,
             configured: ($spec == 1), diag: ($diag == 1 and $spec == 1),
             capabilities: {
                 diagnose: ($diag == 1 and $spec == 1 and $running == 1),
+                setup:$setup,
                 inspect_subscriptions: ($vless + $hy2 + $proxy > 0),
                 probe_node: ($vless + $hy2 + $proxy > 0),
                 probe_all_nodes: ($vless + $hy2 + $proxy > 0),
@@ -133,7 +164,7 @@ steer_info() {
                 read_routes: ($spec == 1),
                 prepare_migration: ($spec == 1 and $running == 1 and $managed),
                 check_handover: ($running == 1 and $migration.validated == true),
-                refresh_draft_subscription: ($running == 1 and $migration.validated == true),
+                refresh_draft_subscription: ($standalone_draft or ($running == 1 and $migration.validated == true)),
                 test_draft_lists: ($running == 1 and $migration.validated == true),
                 takeover: ($running==1 and $handover.ownership_transferred!=true and
                     $handover.subscription.validated==true and $handover.lists.validated==true),
@@ -143,6 +174,7 @@ steer_info() {
             migration: $migration,
             handover: $handover,
             draft_apply: $draft_apply,
+            standalone_draft:$standalone_draft,
             subscription: $subscription,
             manager_managed: $managed,
             previous_manager: (if $managed then "Zapret Manager" else null end),
@@ -161,6 +193,8 @@ steer_info() {
                     device: (($actual.device // .value.device) | token),
                     up: ($actual.up // false), runtime: ($actual | length > 0),
                     selected: ($actual.group.selected | token), members: (.value.members | tokens),
+                    configured_nodes: ([.value.nodes | if type=="array" then .[] else . end | node_index]),
+                    active_nodes: daemon_nodes($actual),
                     on_fail: (.value.on_fail | token),
                     subscription: (.value.subscription | type == "string" and length > 0),
                     can_check: (
@@ -221,6 +255,7 @@ steer_execute() {
     local action=$1 output proto cmd summary
     steer_action_allowed "$action" || return 1
     case "$action" in
+        setup) steer_setup_draft; return ;;
         edit)
             case "$(jq -r '.type' "${2:-}")" in
                 subscription_set|subscription_remove) steer_subscription_edit "$2" ;;

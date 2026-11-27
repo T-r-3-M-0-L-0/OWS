@@ -6,6 +6,7 @@ ZC_DNS=/root/zapret2-tools/dns-learning.sh
 [ -x "$ZC_DNS" ] || ZC_DNS=/usr/lib/ows/dns-learning.sh
 ZC_HEALTH=/opt/zapret2/healthcheck.sh
 ZC_RUNS=/tmp/zapret2-strategy-ui
+. "${LIB:-/usr/lib/ows}/zapret-nfqueue.sh"
 
 zapret_constructor_ready() {
     [ -x "$ZC_CONTROL" ] && [ -x /etc/init.d/zapret2 ]
@@ -123,8 +124,8 @@ zapret_constructor_execute() (
             ;;
         compare-stop) zapret_control_action stop ;;
         compare-recover) zapret_control_action recover ;;
-        nfq-optimize) zapret_control_action nfqoptimize ;;
-        nfq-rollback) zapret_control_action nfqrollback ;;
+        nfq-optimize) zapret_nfq_execute optimize ;;
+        nfq-rollback) zapret_nfq_execute rollback ;;
         classify:*)
             IFS=: read -r domain runs timeout ipv6 extra <<EOF
 ${action#*:}
@@ -258,7 +259,7 @@ zapret_constructor_state() (
             zapret_control_read memory | jq -c '{memory:(.memory//""|.[-6000:])}'
             ;;
         nfq-status)
-            zapret_control_read nfqstatus
+            zapret_nfq_status
             ;;
         status|'')
             ordinary=$(zapret_control_read status)

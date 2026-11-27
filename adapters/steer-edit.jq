@@ -12,6 +12,10 @@ def macs:
     then unique else error("invalid device group") end;
 def generated:
     .name as $n | ["OWS: bypass devices","OWS: device exceptions","OWS: full VPN","OWS: exclusions"] | index($n) != null;
+def editable_output($key):
+    (.outputs[$key].kind // "") as $kind |
+    ($kind=="warp" and ($key|startswith("ows_warp_"))) or
+    ($kind=="interface" and ($key|startswith("ows_tun_")));
 
 $change[0] as $c |
 if $c.type=="node" then
@@ -22,6 +26,22 @@ elif $c.type=="connection" then
     if ($available | index($out)) == null then error("unsupported routing target") else
         .rules |= map(.out as $old | if (generated|not) and ($available|index($old)) != null then .out=$out else . end)
     end
+elif $c.type=="output_save" then
+    if ($c.name|type)!="string" or ($c.name|identifier(18)|not) then error("invalid output name") else . end |
+    pick($c.kind; ["warp","interface"]) as $kind |
+    (if $kind=="warp" then "ows_warp_" else "ows_tun_" end) + $c.name as $key |
+    if ($c.original // "")=="" then
+        if .outputs|has($key) then error("output already exists") else . end
+    elif $c.original!=$key or (editable_output($key)|not) then error("unknown editable output") else . end |
+    .outputs[$key] = ((.outputs[$key] // {kind:$kind,on_fail:"drop"}) |
+        if $kind=="warp" then
+            .transport=pick($c.transport; ["awg","masque"]) |
+            .count=pick($c.count; [1,2,3,4])
+        else .device=$c.device end)
+elif $c.type=="output_remove" then
+    choice($c.original) as $key |
+    if editable_output($key)|not then error("unknown editable output") else del(.outputs[$key]) end |
+    if any(.. | strings; .==$key) then error("output still referenced") else . end
 elif $c.type=="service" then
     choice($c.output) as $out |
     if ($c.index|type)!="number" or $c.index!=($c.index|floor) or $c.index<0 or

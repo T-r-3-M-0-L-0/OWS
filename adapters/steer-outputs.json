@@ -3,5 +3,8 @@
   "zmv_vless": "VLESS",
   "zmv_hy2": "Hysteria2",
   "zmv_hysteria2": "Hysteria2",
+  "vless": "VLESS",
+  "hysteria2": "Hysteria2",
+  "proxy": "Прокси",
   "ows_direct": "Напрямую"
 }

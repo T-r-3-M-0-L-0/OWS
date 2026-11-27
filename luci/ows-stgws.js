@@ -42,21 +42,27 @@ return baseclass.extend({
                     [_('Версия пакета'), data.version], [_('Основной домен'), data.domain],
                     [_('Запуск при загрузке'), data.enabled ? _('Включён') : _('Выключен')]
                 ])),
-                E('div', { class: 'ows-actions' }, action(_('Перезапустить'), 'restart', !installed,
-                    _('Перезапустить sTGWS? Активные соединения переподключатся.')))
+                E('div', { class: 'ows-actions' }, [
+                    action(data.running ? _('Остановить') : _('Запустить'), data.running ? 'stop' : 'start', !installed),
+                    action(_('Перезапустить'), 'restart', !installed || !data.running,
+                        _('Перезапустить sTGWS? Активные соединения переподключатся.')),
+                    action(data.enabled ? _('Отключить автозапуск') : _('Включить автозапуск'),
+                        data.enabled ? 'disable' : 'enable', !installed)
+                ])
             );
             var rows = (data.routes || []).map(function(route) {
                 return [route.dc, route.mode, route.front || '—'];
             });
             routes.replaceChildren(
-                rows.length ? owsUI.table([_('ДЦ'), _('Режим'), _('Фронт')], rows) : E('p', {}, _('Карта маршрутов пуста')),
+                rows.length ? owsUI.table([_('ДЦ'), _('Режим'), _('Фронт')], rows) : E('p', {}, _('Карта маршрутов ещё не построена. Подбор проверит доступность дата-центров и запустит мост.')),
                 E('div', { class: 'ows-actions' }, [
-                    action(_('Проверить MTProto'), 'check', !installed),
-                    action(_('Подобрать домен'), 'reconfigure', !installed, _('Запустить подбор домена sTGWS?')),
-                    action(_('Умная карта'), 'route_smart', !installed, _('Проверить альтернативы и применить прошедшую проверку карту?')),
-                    action(_('Сохранить карту'), 'route_save', !installed),
-                    action(_('Восстановить карту'), 'route_restore', !installed || !data.saved, _('Применить сохранённую карту после проверки?')),
-                    action(data.smart ? _('Авто-карта включена') : _('Авто-карта выключена'), data.smart ? 'route_auto_off' : 'route_auto_on', !installed)
+                    action(_('Проверить MTProto'), 'check', !installed || !rows.length),
+                    action(rows.length ? _('Подобрать домен') : _('Построить карту'), 'reconfigure', !installed,
+                        rows.length ? _('Запустить подбор домена sTGWS?') : _('Запустить подбор маршрутов sTGWS и включить мост?')),
+                    action(_('Умная карта'), 'route_smart', !installed || !rows.length, _('Проверить альтернативы и применить прошедшую проверку карту?')),
+                    action(_('Сохранить карту'), 'route_save', !installed || !rows.length),
+                    action(_('Восстановить карту'), 'route_restore', !installed || !rows.length || !data.saved, _('Применить сохранённую карту после проверки?')),
+                    action(data.smart ? _('Авто-карта включена') : _('Авто-карта выключена'), data.smart ? 'route_auto_off' : 'route_auto_on', !installed || !rows.length)
                 ])
             );
 
@@ -78,7 +84,7 @@ return baseclass.extend({
                     : _('Пакет tgws пока не найден в локальном индексе.')),
                 !installed ? E('p', {}, _('OWS скачает пакет sTGWS для архитектуры роутера в формате APK или IPK.')) : '',
                 E('div', { class: 'ows-actions' }, [
-                    action(_('Установить sTGWS'), 'install', installed || !data.manager, _('Установить sTGWS и запустить службу?')),
+                    action(_('Установить sTGWS'), 'install', installed || !data.manager, _('Установить пакет sTGWS?')),
                     action(_('Обновить'), 'update', !installed || !data.available, _('Обновить пакет tgws?')),
                     action(_('Переустановить'), 'reinstall', !installed || !data.available, _('Переустановить пакет tgws?')),
                     action(_('Удалить пакет'), 'remove', !installed || !data.manager, _('Удалить пакет tgws? Мост перестанет обслуживать соединения.'))

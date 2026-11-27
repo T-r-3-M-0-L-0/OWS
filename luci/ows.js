@@ -47,6 +47,10 @@ var labels = {
 
 var stgwsActions = {
     check: _('Проверка MTProto'),
+    start: _('Запуск'),
+    stop: _('Остановка'),
+    enable: _('Включение автозапуска'),
+    disable: _('Отключение автозапуска'),
     restart: _('Перезапуск'),
     reconfigure: _('Подбор домена'),
     route_smart: _('Умная карта'),
@@ -65,7 +69,12 @@ function statusLabel(result, template) {
             dns: _('Ожидает завершения операции с DNS'),
             firewall: _('Ожидает освобождения файрвола и маршрутов'),
             telegram: _('Ожидает завершения операции с ТГ-прокси'),
-            strategy: _('Ожидает завершения проверки Zapret2')
+            strategy: _('Ожидает завершения проверки Zapret2'),
+            strategy_recovery: _('Ожидает восстановления Zapret2 после проверки'),
+            stgws_probe: _('Ожидает завершения проверок карты sTGWS'),
+            dns_recovery: _('Ожидает восстановления DNS'),
+            memory: _('Для второй проверки пока недостаточно ОЗУ'),
+            tmp_space: _('Для второй проверки пока недостаточно места в /tmp')
         };
         label = waits[result.wait_reason] || label;
     }
@@ -77,6 +86,7 @@ function statusLabel(result, template) {
         var operation = {
             download:_('Скачивание пакетов'), install:_('Установка пакетов'), 'install-latest':_('Установка пакетов'),
             'import-resources':_('Импорт стратегий и ресурсов'),
+            'nfq-optimize':_('Оптимизация NFQUEUE'), 'nfq-rollback':_('Восстановление фильтров NFQUEUE'),
             start:_('Запуск'), stop:_('Остановка'), restart:_('Перезапуск'),
             enable:_('Включение автозапуска'), disable:_('Выключение автозапуска'),
             'compare-start':_('Сравнение стратегий'), 'compare-stop':_('Остановка сравнения'),
@@ -99,14 +109,14 @@ function statusLabel(result, template) {
         var operation = result.action === 'diag' ? _('Диагностика') :
             result.action === 'prepare-migration' ? _('Подготовка переноса') :
             result.action === 'check-handover' ? _('Проверка готовности к передаче') :
-            result.action === 'refresh-draft-subscription' ? _('Обновление подписки в черновике') :
+            result.action === 'refresh-draft-subscription' ? _('Обновление подписки в манифесте') :
             result.action === 'test-draft-lists' ? _('Проверка обновления списков') :
             result.action === 'takeover' ? _('Передача управления') :
             result.action === 'refresh-live-lists' ? _('Обновление рабочих списков') :
             result.action === 'refresh-live-subscription' ? _('Обновление рабочей подписки') :
-            result.action === 'edit' ? _('Изменение конфигурации') :
-            (result.action || '').indexOf('preview-draft:') === 0 ? _('Проверка черновика') :
-            (result.action || '').indexOf('apply-draft:') === 0 ? _('Применение черновика') :
+            result.action === 'edit' ? (result.kind === 'steer' ? _('Редактирование манифеста') : _('Изменение конфигурации')) :
+            (result.action || '').indexOf('preview-draft:') === 0 ? _('Проверка манифеста') :
+            (result.action || '').indexOf('apply-draft:') === 0 ? _('Применение манифеста') :
             (result.action || '').indexOf('probe:') === 0 ? _('Проверка узла') :
             (result.action || '').indexOf('probe-all:') === 0 ? _('Проверка всех узлов') :
             (result.action || '').indexOf('list-preview:') === 0 ? _('Просмотр состава сервиса') : _('Проверка подписки');

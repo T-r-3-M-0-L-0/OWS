@@ -67,7 +67,7 @@ ows_dns_domain_valid() {
 ows_dns_check_domain() {
     local domain=$1 response
     ows_dns_domain_valid "$domain" || return 1
-    response=$(nslookup -type=A "$domain" 127.0.0.1 2>&1) || :
+    response=$(timeout -k 1 5 nslookup -type=A "$domain" 127.0.0.1 2>&1) || :
     if printf '%s\n' "$response" | grep -Eq '^Address:[[:space:]]+0\.0\.0\.0[[:space:]]*$'; then
         printf '%s: DNS вернул 0.0.0.0.\n' "$domain"
     elif printf '%s\n' "$response" | grep -q 'NXDOMAIN'; then
@@ -84,7 +84,7 @@ ows_dns_check_domain() {
 
 ows_dns_check() {
     local failed=0 list domain response
-    if nslookup example.org 127.0.0.1 2>/dev/null | grep -q '^Name:'; then
+    if timeout -k 1 5 nslookup example.org 127.0.0.1 2>/dev/null | grep -q '^Name:'; then
         echo 'Обычное DNS-разрешение подтверждено.'
     else
         echo 'Обычный DNS-запрос завершился без ответа.'
@@ -100,7 +100,7 @@ ows_dns_check() {
     if [ -z "$domain" ]; then
         echo 'В активных списках AdBlock Fast не найден домен для проверки.'
     else
-        response=$(nslookup "$domain" 127.0.0.1 2>&1) || :
+        response=$(timeout -k 1 5 nslookup "$domain" 127.0.0.1 2>&1) || :
         if printf '%s\n' "$response" | grep -Eq 'NXDOMAIN|^Address: (0\.0\.0\.0|::)$'; then
             echo 'Блокировка домена подтверждена.'
         else

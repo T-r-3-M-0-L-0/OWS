@@ -7,7 +7,7 @@ STGWS_STATE=/etc/ows/stgws
 
 stgws_action_allowed() {
     case "$1" in
-        install|update|reinstall|remove|restart|reconfigure|check|route_smart|route_save|route_restore|\
+        install|update|reinstall|remove|start|stop|enable|disable|restart|reconfigure|check|route_smart|route_save|route_restore|\
         route_auto_on|route_auto_off|schedule_off|schedule_h1|schedule_h2|schedule_h3|schedule_h6|schedule_h12|watch_on|watch_off) return 0 ;;
         *) return 1 ;;
     esac
@@ -64,7 +64,7 @@ stgws_backup() {
 }
 
 stgws_package() {
-    local action=$1 manager
+    local action=$1 manager installed=0 running=0 enabled=0
     manager=$(stgws_package_manager)
     [ -n "$manager" ] || { echo 'Менеджер пакетов недоступен'; return 1; }
     if [ "$action" != install ] && [ "$action" != remove ] && [ -z "$(stgws_versions "$manager")" ]; then
@@ -72,6 +72,15 @@ stgws_package() {
         return 1
     fi
     stgws_backup || return 1
+    if [ -x "$STGWS_INIT" ]; then
+        installed=1
+        stgws_running && running=1
+        if "$STGWS_INIT" enabled; then enabled=1; fi
+        if [ "$action" = install ]; then
+            echo 'sTGWS уже установлен'
+            return 0
+        fi
+    fi
     case "$manager:$action" in
         apk:install|opkg:install) . "$LIB/release-install.sh"; ows_install_release stgws ;;
         apk:update) apk upgrade tgws ;;
@@ -88,18 +97,26 @@ stgws_package() {
         }
         return 0
     fi
-    [ -x "$STGWS_INIT" ] && "$STGWS_INIT" enable || return 1
-    if [ "$action" = install ] && stgws_running; then return 0; fi
-    "$STGWS_INIT" restart && stgws_wait
+    [ -x "$STGWS_INIT" ] || return 1
+    if [ "$enabled" = 1 ]; then "$STGWS_INIT" enable || return 1
+    else "$STGWS_INIT" disable || return 1; fi
+    if [ "$running" = 1 ]; then
+        "$STGWS_INIT" restart && stgws_wait
+    elif stgws_running; then
+        "$STGWS_INIT" stop && ! stgws_running
+    elif [ "$installed" = 0 ]; then
+        echo 'sTGWS установлен. Запуск и автозапуск доступны на вкладке «Служба».'
+    fi
 }
 
 stgws_pick() (
-    if [ -f "$STGWS_DIR/smart-map" ]; then
+    if [ -f "$STGWS_DIR/smart-map" ] && [ -s "$STGWS_DIR/route.conf" ]; then
         sh "$STGWS_HELPER"
         exit $?
     fi
     # The native picker writes more than route.conf. Snapshot its complete inputs.
-    local work file restored
+    local work file restored running=0
+    if stgws_running; then running=1; fi
     mkdir -p "$STGWS_STATE" || exit 1
     work=$(mktemp -d "$STGWS_STATE/pick.XXXXXX") || exit 1
     for file in domain route.conf spec.json tgws-domains.lst; do
@@ -121,7 +138,10 @@ stgws_pick() (
             rm -f "$STGWS_DIR/$file" || restored=0
         fi
     done
-    if [ "$restored" = 1 ] && "$STGWS_INIT" restart && stgws_wait; then
+    if [ "$restored" = 1 ] && {
+        if [ "$running" = 1 ]; then "$STGWS_INIT" restart && stgws_wait
+        else ! stgws_running || { "$STGWS_INIT" stop && ! stgws_running; }; fi
+    }; then
         rm -rf "$work"
         echo 'Подбор не прошёл проверку. Прежние настройки восстановлены'
         exit 1
@@ -167,10 +187,12 @@ stgws_execute() {
     esac
     [ -x "$STGWS_INIT" ] || { echo 'Служба tgws не установлена'; return 1; }
     case "$action" in
-        restart)
-            "$STGWS_INIT" restart && stgws_wait || { echo 'Мост не запустился'; return 1; }
+        start|restart)
+            "$STGWS_INIT" "$action" && stgws_wait || { echo 'Мост не запустился'; return 1; }
             date +%s > "$RUN/stgws-last"
             return ;;
+        stop) "$STGWS_INIT" stop && ! stgws_running; return ;;
+        enable|disable) "$STGWS_INIT" "$action"; return ;;
         route_auto_on) : > "$STGWS_DIR/smart-map"; return ;;
         route_auto_off) rm -f "$STGWS_DIR/smart-map"; return ;;
     esac

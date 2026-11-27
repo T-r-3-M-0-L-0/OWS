@@ -19,6 +19,14 @@ steer_handover_state() (
 )
 
 steer_subscription_outputs() {
+    if [ -f "$edit_root/standalone" ]; then
+        jq -L /usr/lib/ows -r --arg prefix "$edit_root/" '
+            include "ows-json";
+            .outputs | to_entries[] | select(.value.subscription | strings |
+                startswith($prefix) and endswith("/subscription.txt")) | .key | select(identifier(64))
+        ' "$edit_spec"
+        return
+    fi
     jq -L /usr/lib/ows -r --arg source "$edit_root/files/etc/zm-steer/sub.txt" '
         include "ows-json";
         (.outputs // {}) | to_entries[] | select(.value.subscription==$source) |
@@ -53,7 +61,10 @@ steer_subscription_status() (
         OWS_STEER_ACTIVE_UPDATE=1
         live=true
     fi
-    if steer_editor_locate && file=$(steer_subscription_file); then
+    if ! steer_editor_locate; then
+        if [ "${1:-}" = reveal ]; then echo '{"error":"Конфигурация подписки недоступна"}'
+        else echo '{"editable":false}'; fi
+    elif file=$(steer_subscription_file); then
         url=$(steer_subscription_source "$file")
         case "$url" in https://?*) ;; *) url='' ;; esac
         if [ "${1:-}" = reveal ]; then
@@ -68,6 +79,8 @@ steer_subscription_status() (
         fi
     elif [ "${1:-}" = reveal ]; then
         echo '{"error":"Конфигурация подписки недоступна"}'
+    elif [ -f "$edit_root/standalone" ] && steer_can_setup; then
+        jq -nc --arg rev "$edit_revision" '{editable:true,live:false,configured:false,revision:$rev,can_reset_pins:false}'
     else
         echo '{"editable":false}'
     fi
@@ -79,20 +92,53 @@ steer_subscription_edit() (
     revision=$(jq -er '.revision|strings' "$1") || exit 1
     [ "$revision" = "$edit_revision" ] || { echo 'Конфигурация изменилась. Обновите вкладку'; exit 1; }
     case "$(jq -r '.type' "$1")" in
-        subscription_set) steer_refresh_draft_subscription set "$1" ;;
+        subscription_set)
+            if [ -f "$edit_root/standalone" ] && steer_can_setup && ! steer_subscription_file >/dev/null; then
+                steer_setup_subscription "$1"
+            else steer_refresh_draft_subscription set "$1"; fi ;;
         subscription_remove) steer_refresh_draft_subscription remove ;;
         *) exit 1 ;;
     esac
 )
 
+steer_subscription_read_url() {
+    jq -L /usr/lib/ows -er 'include "ows-json";
+        .url | strings | select(length<=4096 and any(url_parts; .scheme=="https")
+            and (explode | all(.[]; (whitespace_code or control_code) | not)))' "$1" ||
+        { echo 'Введите корректную HTTPS-ссылку подписки' >&2; return 1; }
+}
+
+steer_subscription_fetch() (
+    local url=$1 work=$2
+    mkdir "$work/fetch-state" || exit 1
+    [ ! -d /var/lib/steer ] || cp -a /var/lib/steer/. "$work/fetch-state/" || exit 1
+    if ! (ulimit -f 8192; timeout 25 steer sub-fetch "$url" --out "$work/subscription.txt" \
+        --state-dir "$work/fetch-state") >/dev/null 2>&1 || [ ! -s "$work/subscription.txt" ]; then
+        echo 'Не удалось загрузить подписку. Текущий список узлов сохранён.' >&2
+        exit 1
+    fi
+    rm -rf "$work/fetch-state" && [ "$(wc -c < "$work/subscription.txt")" -le 4194304 ] ||
+        { echo 'Подписка превышает 4 МиБ' >&2; exit 1; }
+)
+
 steer_remap_indexes() {
     jq -nec --slurpfile old "$1" --slurpfile new "$2" --argjson pins "$3" '
         def key: [.name,.host,.port,.type,.security,.cc];
+        def endpoint: [(.host|ascii_downcase),(.port|tostring),.type,.security];
         def remap($i):
             [$old[0].nodes[] | select(.index==$i)] |
-            if length!=1 then error("old node is ambiguous") else .[0]|key end as $key |
-            [$new[0].nodes[] | select(key==$key) | .index | numbers] |
-            if length==1 then .[0] else error("new node is ambiguous") end;
+            if length!=1 then error("old node is ambiguous") else .[0] end as $node |
+            [$new[0].nodes[] | select(key==($node|key)) | .index | numbers] as $exact |
+            if ($exact|length)==1 then $exact[0]
+            elif ($exact|length)>1 or ($node.host|type)!="string" or
+                ($node.host|length)==0 or $node.port==null then error("new node is ambiguous")
+            else
+                ($node|endpoint) as $endpoint |
+                [$old[0].nodes[] | select((endpoint? // [])==$endpoint)] as $old_matches |
+                [$new[0].nodes[] | select((endpoint? // [])==$endpoint) | .index | numbers] as $new_matches |
+                if ($old_matches|length)==1 and ($new_matches|length)==1 then $new_matches[0]
+                else error("new node is ambiguous") end
+            end;
         if ($pins|type)=="number" then remap($pins)
         elif ($pins|type)=="array" then $pins | map(remap(.))
         else error("unsupported pins") end' 2>/dev/null
@@ -101,15 +147,12 @@ steer_remap_indexes() {
 steer_refresh_draft_subscription() (
     umask 077
     mode=${1:-refresh}
-    steer_editor_locate || { echo 'Сначала соберите черновик переноса'; exit 1; }
+    steer_editor_locate || { echo 'Сначала подготовьте манифест steer'; exit 1; }
     previous=$(steer_subscription_file) || { echo 'Не найдены выходы подписки'; exit 1; }
     url=$(steer_subscription_source "$previous") || exit 1
     case "$mode" in
         set)
-            url=$(jq -L /usr/lib/ows -er 'include "ows-json";
-                .url | strings | select(length<=4096 and any(url_parts; .scheme=="https")
-                    and (explode | all(.[]; (whitespace_code or control_code) | not)))' "$2") ||
-                { echo 'Введите корректную HTTPS-ссылку подписки'; exit 1; }
+            url=$(steer_subscription_read_url "$2") || exit 1
             ;;
         remove)
             [ -n "$url" ] || { echo 'Ссылка уже удалена'; exit 0; }
@@ -137,13 +180,7 @@ steer_refresh_draft_subscription() (
     if [ "$mode" = remove ]; then
         cp "$previous" "$work/subscription.txt" || exit 1
     else
-        mkdir "$work/fetch-state" && cp -a /var/lib/steer/. "$work/fetch-state/" || exit 1
-        if ! (ulimit -f 8192; timeout 25 steer sub-fetch "$url" --out "$work/subscription.txt" \
-            --state-dir "$work/fetch-state") >/dev/null 2>&1 || [ ! -s "$work/subscription.txt" ]; then
-            echo 'Не удалось загрузить подписку. Текущий список узлов сохранён.'
-            exit 1
-        fi
-        rm -rf "$work/fetch-state"
+        steer_subscription_fetch "$url" "$work" || exit 1
     fi
     [ "$(wc -c < "$work/subscription.txt")" -le 4194304 ] || { echo 'Подписка превышает 4 МиБ'; exit 1; }
     steer_subscription_outputs > "$work/outputs" || exit 1
@@ -199,13 +236,13 @@ steer_refresh_draft_subscription() (
     jq -n --argjson outputs "$checked" --argjson checked "$(date +%s)" \
         '{validated:true, outputs:$outputs, checked:$checked}' > "$edit_root/subscription-check.new" &&
         mv -f "$edit_root/subscription-check.new" "$edit_root/subscription-check.json" || exit 1
-    if [ "$mode" = remove ]; then echo 'Ссылка удалена из черновика. Список узлов сохранён.'
-    else echo 'Новая подписка сохранена в черновике и проверена steer.'; fi
+    if [ "$mode" = remove ]; then echo 'Ссылка удалена из манифеста. Список узлов сохранён.'
+    else echo 'Новая подписка сохранена в манифесте и проверена steer.'; fi
 )
 
 steer_check_handover() (
     umask 077
-    steer_editor_locate || { echo 'Сначала соберите черновик переноса'; exit 1; }
+    steer_editor_locate || { echo 'Сначала подготовьте манифест steer'; exit 1; }
     work=$(mktemp -d /tmp/ows-steer-handover.XXXXXX) || exit 1
     trap 'rm -rf "$work"' EXIT
     source_match=true
@@ -236,6 +273,6 @@ steer_check_handover() (
     if [ "$source_match" = true ]; then echo 'Рабочие файлы совпадают со снимком импорта.'
     else echo 'Рабочая спека или списки изменились после импорта. Перед переключением нужен новый снимок.'; fi
     if [ "$equal" = true ]; then echo 'Скомпилированные правила совпадают.'
-    else echo 'Черновик даёт другие правила. Перед переключением нужно проверить различия.'; fi
+    else echo 'Правила манифеста отличаются от рабочих. Перед переключением нужно проверить различия.'; fi
     printf 'Заданий Zapret Manager ещё активны: %s.\n' "$jobs"
 )

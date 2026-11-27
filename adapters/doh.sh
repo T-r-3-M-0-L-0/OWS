@@ -33,15 +33,14 @@ doh_draft() { ows_latest_draft "$OWS_DOH_STATE"; }
 
 doh_info() (
     local installed=false running=false failover=false fallback=false force=false draft report=/dev/null jobs upstream
-    local owner=standalone guard=false chain='' active='' native=false
+    local owner=standalone guard=false chain='' active='' native=false initialize=false standalone=false
     [ ! -x /etc/init.d/https-dns-proxy ] || installed=true
     [ ! -r /usr/share/luci/menu.d/luci-app-https-dns-proxy.json ] || native=true
     if ! command -v jq >/dev/null; then
         printf '{"installed":%s,"native":%s,"limited":true}\n' "$installed" "$native"
         return
     fi
-    if ubus -S call service list '{"name":"https-dns-proxy"}' 2>/dev/null |
-        jsonfilter -e '@["https-dns-proxy"].instances.*.running' | grep -Fxq true; then running=true; fi
+    if doh_proxy_running; then running=true; fi
     [ "$(uci -q get https-dns-proxy.config.force_dns)" != 1 ] || force=true
     if grep -Fxq 'fo=1' "$OWS_DOH_MANAGER/doh_failover" 2>/dev/null; then failover=true; fi
     if grep -Fxq 'direct=1' "$OWS_DOH_MANAGER/doh_failover" 2>/dev/null; then fallback=true; fi
@@ -54,20 +53,24 @@ doh_info() (
     if draft=$(doh_draft); then report="$draft/report.json"; fi
     if doh_owned; then
         owner=ows
-        failover=true
+        failover=false
+        if doh_auto_enabled; then failover=true; fi
+        if doh_standalone; then standalone=true; fi
         fallback=false
         if doh_guard_intact; then guard=true; fi
         chain=$(cut -f 1 "$OWS_DOH_LIVE/providers" 2>/dev/null || :)
         active=$(doh_current_id "$OWS_DOH_LIVE/providers" || :)
-    fi
+    elif [ "$owner" = standalone ] && doh_can_initialize; then initialize=true; fi
     doh_resolvers | jq -Rsc --argjson installed "$installed" --argjson running "$running" --argjson native "$native" \
         --argjson failover "$failover" --argjson fallback "$fallback" --argjson force "$force" \
         --argjson jobs "$jobs" --arg upstream "$upstream" --slurpfile draft "$report" \
         --arg owner "$owner" --argjson guard "$guard" --arg chain "$chain" --arg active "$active" \
+        --argjson initialize "$initialize" --argjson standalone "$standalone" \
         --arg catalog "$(doh_catalog)" '
         {installed:$installed,running:$running,native:$native,failover:$failover,direct_fallback:$fallback,
          force_dns:$force,legacy_jobs:$jobs,upstreams:($upstream|split("\n")|map(select(length>0))),
-         owner:$owner,guard:$guard,active:$active,providers:($chain|split("\n")|map(select(length>0))),
+         owner:$owner,guard:$guard,active:$active,can_initialize:$initialize,standalone_setup:$standalone,
+         providers:($chain|split("\n")|map(select(length>0))),
          available_providers:($catalog|split("\n")|map(select(length>0)|split("|")|
              {id:.[0],family:.[1],label:.[2],kind:.[3],url:.[4],description:(.[6] // "")})),
          migration:($draft[0] // {prepared:false}),
