@@ -39,21 +39,43 @@ steer_commit_live() {
         "$OWS_STEER_LIVE/previous-spec.json" steer_apply_live_spec
 }
 
-steer_prune_live() {
-    local path draft draft_spec=/dev/null draft_base=/dev/null
-    draft=$(cat "$edit_root/editor" 2>/dev/null || :)
-    case "$draft" in
-        *[!A-Za-z0-9.]*) ;;
-        edit.*) draft_spec=$edit_root/$draft/spec.json; draft_base=$edit_root/$draft/base.json ;;
-    esac
-    for path in "$edit_root"/live.*; do
-        [ -d "$path" ] || break
-        if ! grep -Fq "$path/" "$OWS_STEER_SPEC" "$OWS_STEER_LIVE/previous-spec.json" \
-            "$draft_spec" "$draft_base" 2>/dev/null; then
-            rm -rf "$path"
-        fi
+steer_prune_live() (
+    local path draft status managed references
+    [ -s "$OWS_STEER_SPEC" ] && [ -s "$edit_root/spec.json" ] || exit 0
+    for managed in update.pending editor.pending takeover.pending setup.pending; do
+        [ ! -e "$OWS_STEER_LIVE/$managed" ] || exit 0
     done
-}
+    draft=''
+    if [ -e "$edit_root/editor" ] || [ -L "$edit_root/editor" ]; then
+        draft=$(cat "$edit_root/editor" 2>/dev/null) || exit 0
+    fi
+    case "$draft" in
+        *[!A-Za-z0-9.]*) exit 0 ;;
+        edit.*) [ -s "$edit_root/$draft/spec.json" ] && [ -s "$edit_root/$draft/base.json" ] || exit 0 ;;
+        '') ;;
+        *) exit 0 ;;
+    esac
+    set -- "$OWS_STEER_SPEC" "$edit_root/spec.json"
+    for managed in "$OWS_STEER_LIVE/previous-spec.json" "$OWS_STEER_LIVE/backup/spec.json"; do
+        [ ! -e "$managed" ] || set -- "$@" "$managed"
+    done
+    if [ -n "$draft" ]; then set -- "$@" "$edit_root/$draft/spec.json" "$edit_root/$draft/base.json"; fi
+    references=$(mktemp "${TMPDIR:-/tmp}/ows-steer-refs.XXXXXX") || exit 0
+    trap 'rm -f "$references"' EXIT
+    for managed do
+        [ -f "$managed" ] && [ -r "$managed" ] || exit 0
+        jq -er --arg prefix "$edit_root/live." '
+            if type=="object" then "", (.. | strings | select(contains($prefix)))
+            else error("expected a steer manifest") end
+        ' "$managed" >> "$references" 2>/dev/null || exit 0
+    done
+    for path in "$edit_root"/live.*; do
+        [ -d "$path" ] && [ ! -L "$path" ] || continue
+        if grep -F -- "$path" "$references" >/dev/null 2>&1; then continue; else status=$?; fi
+        [ "$status" = 1 ] && rm -rf "$path"
+    done
+    exit 0
+)
 
 steer_refresh_lists() (
     umask 077

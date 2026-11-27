@@ -34,7 +34,7 @@ var defaults = {
             ];
         },
         native: {
-            route: 'netshift',
+            route: 'ows-native-netshift',
             acl: 'luci-app-netshift',
             visible: function(state) { return state.ui && state.ui.native; }
         },
@@ -72,7 +72,7 @@ var defaults = {
         label: _('Блокировка рекламы'),
         install: true,
         installConfirmation: _('Установить AdBlock Fast из репозитория OpenWrt? Пакет может запустить фильтрацию.'),
-        native: { route: 'adblock-fast', acl: 'luci-app-adblock-fast' },
+        native: { route: 'ows-native-adblock-fast', acl: 'luci-app-adblock-fast' },
         tab: function(entry, context, template) {
             return dns.adblockTab(entry, context, template.native);
         }

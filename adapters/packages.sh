@@ -28,7 +28,7 @@ ows_package_for_tool() {
 ows_tool_available() {
     command -v "$1" >/dev/null || return 1
     case "$1" in
-        timeout) timeout -k 1 1 true >/dev/null 2>&1 ;;
+        timeout) timeout -k 1 1 /bin/sh -c ':' >/dev/null 2>&1 ;;
         jshn) [ -r /usr/share/libubox/jshn.sh ] ;;
     esac
 }

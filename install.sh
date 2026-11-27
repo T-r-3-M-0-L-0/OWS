@@ -24,6 +24,7 @@ upgrade_ready() {
     [ ! -d /etc/ows/system-handover.pending ] || fail 'Resolve pending system handover before upgrading'
     [ ! -d /etc/ows/network-compat.pending ] || fail 'Resolve pending network handover before upgrading'
     [ ! -d /etc/ows/adblock-live/pending ] || fail 'Resolve pending adblock recovery before upgrading'
+    [ ! -f /etc/ows/adblock-fast.pending ] || fail 'Resolve pending AdBlock Fast recovery before upgrading'
     [ ! -e /etc/ows/doh-live/takeover.pending ] && [ ! -d /etc/ows/doh-live/switch.pending ] &&
         [ ! -d /etc/ows/doh-live/initialize.pending ] && [ ! -d /etc/ows/steer-live/setup.pending ] ||
         fail 'Resolve pending DoH recovery before upgrading'
@@ -61,9 +62,11 @@ adapters/adblock-migration.sh /usr/lib/ows/adblock-migration.sh 644
 adapters/adblock-policy.sh /usr/lib/ows/adblock-policy.sh 644
 adapters/adblock-update.sh /usr/lib/ows/adblock-update.sh 644
 adapters/adblock-live.sh /usr/lib/ows/adblock-live.sh 644
+adapters/adblock-fast.sh /usr/lib/ows/adblock-fast.sh 644
 adapters/adblock-storage.sh /usr/lib/ows/adblock-storage.sh 644
 adapters/stgws.sh /usr/lib/ows/stgws.sh 644
 adapters/netshift.sh /usr/lib/ows/netshift.sh 644
+adapters/module-links.sh /usr/lib/ows/module-links.sh 644
 adapters/tg-ws-proxy.sh /usr/lib/ows/tg-ws-proxy.sh 644
 adapters/steer.sh /usr/lib/ows/steer.sh 644
 adapters/steer-migration.sh /usr/lib/ows/steer-migration.sh 644
@@ -81,6 +84,7 @@ adapters/steer-outputs.json /usr/lib/ows/steer-outputs.json 644
 adapters/vpn.sh /usr/lib/ows/vpn.sh 644
 openwrt/stgws-route.sh /usr/lib/ows/stgws-route.sh 644
 bin/ows /usr/sbin/ows 755
+uninstall.sh /usr/sbin/ows-uninstall 755
 openwrt/ows.init /etc/init.d/ows 755
 FILES
     local asset
@@ -145,6 +149,7 @@ luci/ows-domain-search.js /www/luci-static/resources/view/ows-domain-search.js 6
 luci/ows-service-status.js /www/luci-static/resources/view/ows-service-status.js 644
 luci/ows-legacy-cleanup.js /www/luci-static/resources/view/ows-legacy-cleanup.js 644
 luci/ows-native.js /www/luci-static/resources/view/ows-native.js 644
+luci/ows-native-netshift.js /www/luci-static/resources/view/ows-native-netshift.js 644
 luci/ows-native-zapret2.js /www/luci-static/resources/view/ows-native-zapret2.js 644
 luci/ows.css /www/luci-static/resources/view/ows-services.css 644
 luci/menu-zapret2.json /usr/share/luci/menu.d/zz-luci-app-ows-zapret2.json 644
@@ -155,6 +160,7 @@ FILES
 [ "$(id -u)" = 0 ] || fail 'Install as root'
 [ -x /etc/rc.common ] || fail 'OpenWrt init system is required'
 [ -s "$SRC/adapters/packages.sh" ] || fail 'Missing adapters/packages.sh'
+[ -s "$SRC/adapters/upgrade-retention.sh" ] || fail 'Missing adapters/upgrade-retention.sh'
 . "$SRC/adapters/packages.sh"
 required_tools='uci flock pgrep cmp mktemp dd sha256sum tail jq timeout'
 if [ "$upgrade" = 1 ]; then
@@ -234,6 +240,7 @@ archive_upgrade() (
     [ ! -e "$archive" ] && [ ! -L "$archive" ] || exit 1
     temp=$(mktemp "$archive.XXXXXX") || exit 1
     trap 'rm -f "$temp"' EXIT
+    printf '%s\n' ows-managed-upgrade-v1 > "$backup/retention" || exit 1
     tar -czf "$temp" -C /root "${backup##*/}" && gzip -t "$temp" && mv "$temp" "$archive" || exit 1
     sync || exit 1
     rm -r "$backup" || echo "Unpacked backup still present: $backup" >&2
@@ -337,7 +344,11 @@ if [ "$was_running" = 1 ] || [ "$upgrade" = 0 ]; then
 fi
 trap - EXIT HUP INT TERM
 if [ "$upgrade" = 1 ]; then
-    if archived=$(archive_upgrade); then backup=$archived; fi
+    if archived=$(archive_upgrade); then
+        backup=$archived
+        . "$SRC/adapters/upgrade-retention.sh"
+        ows_prune_upgrade_archives /root "$backup" || :
+    fi
     echo "OWS upgraded. Backup: $backup"
 else
     rm -f "$touched"

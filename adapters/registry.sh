@@ -90,9 +90,9 @@ registry_service_installed() {
 
 registry_builtin_state() {
     registry_service_installed installed "$1"
-    if [ "$1" = netshift ] && [ -x /etc/init.d/netshift ] &&
-        [ ! -s /usr/share/luci/menu.d/luci-app-netshift.json ]; then
-        json_add_boolean needs_interface 1
+    if [ "$1" = netshift ] && [ -x /etc/init.d/netshift ]; then
+        . /usr/lib/ows/netshift.sh
+        netshift_native_view >/dev/null || json_add_boolean needs_interface 1
     fi
 }
 

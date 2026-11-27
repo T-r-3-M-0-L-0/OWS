@@ -39,5 +39,28 @@
       "acl": ["luci-app-zapret"],
       "fs": { "/www/luci-static/resources/view/zapret/settings.js": "file" }
     }
+  },
+  "admin/services/ows-native-netshift": {
+    "action": { "type": "view", "path": "ows-native-netshift" },
+    "depends": {
+      "acl": ["luci-app-netshift"],
+      "fs": { "/usr/share/luci/menu.d/luci-app-netshift.json": "file" },
+      "uci": { "netshift": true }
+    }
+  },
+  "admin/services/ows-native-adblock-fast": {
+    "action": { "type": "view", "path": "adblock-fast/overview" },
+    "depends": {
+      "acl": ["luci-app-adblock-fast"],
+      "fs": { "/www/luci-static/resources/view/adblock-fast/overview.js": "file" },
+      "uci": { "adblock-fast": true }
+    }
+  },
+  "admin/services/ows-native-https-dns-proxy": {
+    "action": { "type": "view", "path": "https-dns-proxy/overview" },
+    "depends": {
+      "acl": ["luci-app-https-dns-proxy"],
+      "fs": { "/www/luci-static/resources/view/https-dns-proxy/overview.js": "file" }
+    }
   }
 }

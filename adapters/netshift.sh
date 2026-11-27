@@ -10,14 +10,31 @@ netshift_running() {
         netshift_rules_active
 }
 
+netshift_native_view() {
+    local path variant menu=/usr/share/luci/menu.d/luci-app-netshift.json
+    [ -s "$menu" ] || return 1
+    path=$(jsonfilter -i "$menu" -e '@["admin/services/netshift"].action.path') || return 1
+    case "$path" in
+        netshift/netshift) ;;
+        netshift_*/netshift)
+            variant=${path#netshift_}
+            variant=${variant%/netshift}
+            case "$variant" in ''|*[!a-f0-9]*) return 1 ;; esac
+            [ "${#variant}" -le 64 ] || return 1
+            ;;
+        *) return 1 ;;
+    esac
+    [ -s "/www/luci-static/resources/view/$path.js" ] && uci -q show netshift >/dev/null && printf '%s\n' "$path"
+}
+
 netshift_info() (
     . /usr/share/libubox/jshn.sh
-    installed=0 running=0 native=0
+    installed=0 running=0 native=0 view=''
     if [ -x /etc/init.d/netshift ]; then
         installed=1
         netshift_running && running=1
     fi
-    [ ! -r /usr/share/luci/menu.d/luci-app-netshift.json ] || native=1
+    if view=$(netshift_native_view); then native=1; fi
     if command -v apk >/dev/null; then
         version=$(apk list --installed netshift 2>/dev/null |
             awk -v prefix=netshift- 'index($1,prefix)==1 {print substr($1,length(prefix)+1); exit}')
@@ -31,6 +48,7 @@ netshift_info() (
     json_add_string version "$version"
     json_add_object ui
     json_add_boolean native "$native"
+    [ -z "$view" ] || json_add_string native_view "$view"
     json_close_object
     json_add_object capabilities
     json_add_boolean diagnose "$installed"

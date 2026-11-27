@@ -29,13 +29,14 @@ adblock_fast_enabled() {
 
 ows_dns_info() (
     . /usr/share/libubox/jshn.sh
-    local dnsmasq=0 watchdog=0 adblock=0 installed=0 enabled=0 native=0 legacy=0 list updated
+    local dnsmasq=0 watchdog=0 adblock=0 installed=0 enabled=0 native=0 legacy=0 force=0 list updated revision
     ows_dns_process dnsmasq && dnsmasq=1
     ows_dns_process netshift-dns-watchdog && watchdog=1
     list=$(ows_dns_list) && adblock=1
     [ ! -x /etc/init.d/adblock-fast ] || installed=1
     if adblock_fast_enabled; then enabled=1; fi
-    if [ -r /usr/share/luci/menu.d/luci-app-adblock-fast.json ] && uci -q show adblock-fast >/dev/null; then native=1; fi
+    if [ -r /usr/share/luci/menu.d/luci-app-adblock-fast.json ] &&
+        [ -s /www/luci-static/resources/view/adblock-fast/overview.js ] && uci -q show adblock-fast >/dev/null; then native=1; fi
     if ows_dns_legacy_adblock; then legacy=1; fi
     json_init
     json_add_boolean dnsmasq "$dnsmasq"
@@ -45,6 +46,12 @@ ows_dns_info() (
     json_add_boolean adblock_fast_enabled "$enabled"
     json_add_boolean adblock_ui "$native"
     json_add_boolean legacy_adblock "$legacy"
+    if [ "$installed" = 1 ] && [ -r /usr/lib/ows/adblock-fast.sh ]; then
+        . /usr/lib/ows/adblock-fast.sh
+        if revision=$(adblock_fast_revision); then json_add_string adblock_fast_revision "$revision"; fi
+        case "$(uci -q get adblock-fast.config.force_dns || echo 1)" in 1|true|yes|on) force=1 ;; esac
+        json_add_boolean adblock_fast_force_dns "$force"
+    fi
     if [ -n "$list" ]; then
         updated=$(date -r "$list" +%s 2>/dev/null) && json_add_int last_update "$updated"
     fi

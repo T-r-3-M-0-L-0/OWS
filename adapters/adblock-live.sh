@@ -13,7 +13,7 @@ adblock_guard_intact() {
         cmp -s "$OWS_ADBLOCK_MANAGER" "$OWS_ADBLOCK_LIVE/manager.guarded"
 }
 
-adblock_install_fast() {
+adblock_fast_compatible() {
     local draft bank
     if adblock_owner; then
         draft=$(adblock_draft_path) && bank=$(adblock_active_bank "$draft") && [ -f "$bank/paused" ] ||
@@ -22,8 +22,9 @@ adblock_install_fast() {
         echo 'Сначала отключите действующую фильтрацию и её расписание в Zapret-Manager.'
         return 1
     fi
-    ows_install_repo_packages adblock-fast luci-app-adblock-fast
 }
+
+adblock_install_fast() { adblock_fast_compatible && ows_install_repo_packages adblock-fast; }
 
 adblock_first_available() {
     local draft paths path tables

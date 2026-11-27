@@ -4,5 +4,29 @@
       "acl": ["luci-app-zapret2"],
       "fs": { "/usr/share/luci/menu.d/zz-luci-app-ows-zapret2.json": "absent" }
     }
+  },
+  "admin/services/zapret": {
+    "depends": {
+      "acl": ["luci-app-zapret"],
+      "fs": { "/usr/share/luci/menu.d/zz-luci-app-ows-zapret2.json": "absent" }
+    }
+  },
+  "admin/services/netshift": {
+    "depends": {
+      "acl": ["luci-app-netshift"],
+      "fs": { "/usr/share/luci/menu.d/zz-luci-app-ows-zapret2.json": "absent" }
+    }
+  },
+  "admin/services/adblock-fast": {
+    "depends": {
+      "acl": ["luci-app-adblock-fast"],
+      "fs": { "/usr/share/luci/menu.d/zz-luci-app-ows-zapret2.json": "absent" }
+    }
+  },
+  "admin/services/https-dns-proxy": {
+    "depends": {
+      "acl": ["luci-app-https-dns-proxy"],
+      "fs": { "/usr/share/luci/menu.d/zz-luci-app-ows-zapret2.json": "absent" }
+    }
   }
 }

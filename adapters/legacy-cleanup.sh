@@ -22,6 +22,20 @@ PATHS
 
 legacy_cleanup_present() { [ -e "$1" ] || [ -L "$1" ]; }
 
+legacy_cleanup_stamp() {
+    if command -v stat >/dev/null 2>&1; then
+        stat -c '%d:%i:%f:%s:%Y:%Z' "$1"
+    else
+        ucode -e '
+            import { lstat } from "fs";
+            let info = lstat(ARGV[0]);
+            if (!info) exit(1);
+            print(join(":", [info.dev.major, info.dev.minor, info.inode,
+                info.type, info.mode, info.size, info.mtime, info.ctime]), "\n");
+        ' -- "$1"
+    fi
+}
+
 legacy_cleanup_blocker() {
     local path objects result
     for path in /usr/libexec/rpcd/zapret-manager /etc/init.d/zm-ui; do
@@ -130,7 +144,7 @@ legacy_cleanup_plan() (
         if [ -n "$reason" ]; then
             printf 'keep\t%s\t%s\n' "$path" "$reason"
         else
-            stamp=$(stat -c '%d:%i:%f:%s:%Y:%Z' "$path") || exit 1
+            stamp=$(legacy_cleanup_stamp "$path") || exit 1
             printf 'remove\t%s\t%s\n' "$path" "$stamp"
         fi
     done
@@ -165,7 +179,7 @@ legacy_cleanup_apply() (
         [ "$decision" = remove ] || continue
         printf '%s\n' "$paths" | grep -Fxq "$path" || exit 1
         blocker=$(legacy_cleanup_target_reason "$path") || exit 1
-        if [ -n "$blocker" ] || [ "$(stat -c '%d:%i:%f:%s:%Y:%Z' "$path")" != "$detail" ]; then
+        if [ -n "$blocker" ] || [ "$(legacy_cleanup_stamp "$path")" != "$detail" ]; then
             printf 'Пропущен изменившийся путь %s.\n' "$path"
             failed=1
         elif rm -rf -- "$path" && ! legacy_cleanup_present "$path"; then
@@ -188,6 +202,8 @@ legacy_cleanup_preview() (
         printf '%s\n' '{"error":"Не удалось проверить остатки Zapret-Manager."}'
         exit 0
     }
+    # jshn initializes its JSON variables lazily. The caller uses set -u.
+    set +u
     . /usr/share/libubox/jshn.sh
     tab=$(printf '\t')
     json_init

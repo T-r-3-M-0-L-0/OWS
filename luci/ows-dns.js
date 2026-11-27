@@ -285,22 +285,48 @@ return baseclass.extend({
         var native = options ? nativeView.tab(Object.assign({id:'adblock-fast-settings'}, options)) : null;
         var open = E('button', {type:'button',class:'cbi-button',hidden:''}, _('Открыть настройки AdBlock Fast'));
         var feedback = owsUI.feedback();
+        var fastSettings = E('div');
         var install = owsUI.button(_('Установить'), installFast);
         var busy = false;
         install.hidden = true;
         var domain = E('input', {type:'text',class:'cbi-input-text',maxlength:254,placeholder:'example.org',required:''});
         if (native) open.addEventListener('click', native.activate);
 
-        function installFast() {
-            if (busy || !window.confirm(_('Установить AdBlock Fast из репозитория OpenWrt? Пакет может запустить фильтрацию.'))) return;
+        function submitFast(action, message) {
+            if (busy || (message && !window.confirm(message))) return;
             busy = install.disabled = true;
-            feedback.start(_('Ставим установку в очередь…'));
-            return owsUI.job(draftAction('install-fast', ''), context.followJob, true).then(function(result) {
+            feedback.start(_('Ставим операцию в очередь…'));
+            return owsUI.job(draftAction(action, ''), context.followJob, true).then(function(result) {
                 owsUI.showResult(feedback, result);
             }).catch(function(error) { feedback.show(error.message); }).finally(function() {
                 busy = false;
                 return loadFast();
             });
+        }
+
+        function installFast() {
+            return submitFast('install-fast', _('Установить AdBlock Fast из репозитория OpenWrt?'));
+        }
+
+        function renderFast(data, conflict) {
+            fastSettings.replaceChildren();
+            if (!data.adblock_fast_revision || (conflict && !data.adblock_fast_enabled)) return;
+            var enabled = E('input', {type:'checkbox'});
+            enabled.checked = data.adblock_fast_enabled;
+            var force = E('input', {type:'checkbox'});
+            force.checked = data.adblock_fast_force_dns;
+            force.disabled = conflict;
+            fastSettings.appendChild(owsUI.form([
+                owsUI.field(_('Фильтрация включена'), enabled),
+                owsUI.field(_('Перехватывать DNS-запросы клиентов'), force)
+            ], _('Применить настройки'), function() {
+                if (enabled.checked === data.adblock_fast_enabled && force.checked === data.adblock_fast_force_dns) return;
+                if (conflict && enabled.checked) return;
+                return submitFast('fast-save:' + data.adblock_fast_revision + ':' + Number(enabled.checked) + ':' + Number(force.checked),
+                    _('Применить настройки AdBlock Fast? Служба может перезапустить DNS.'));
+            }));
+            fastSettings.appendChild(owsUI.button(_('Обновить списки сейчас'), function() { return submitFast('fast-refresh'); },
+                busy || conflict || !data.adblock_fast_enabled));
         }
 
         function loadFast() {
@@ -310,9 +336,10 @@ return baseclass.extend({
                 var available = !!native && data.adblock_ui && !conflict;
                 open.hidden = !available;
                 if (native) native.content.hidden = !available;
-                install.hidden = data.adblock_installed && data.adblock_ui;
+                install.hidden = data.adblock_installed;
                 install.disabled = busy || conflict;
-                install.textContent = data.adblock_installed ? _('Установить интерфейс LuCI') : _('Установить AdBlock Fast');
+                install.textContent = _('Установить AdBlock Fast');
+                renderFast(data, conflict);
                 summary.textContent = conflict ? (status.owner === 'ows' ?
                     _('Сначала приостановите фильтрацию OWS во вкладке dnsmasq + nftables.') :
                     _('Сначала отключите действующую блокировку в Zapret-Manager.')) :
@@ -329,7 +356,7 @@ return baseclass.extend({
             ])},
             {id:'adblock-fast-mode', label:'AdBlock Fast', activate:loadFast, content:E('div', {}, [
                 summary, E('p', {}, external(_('Документация AdBlock Fast'), 'https://docs.mossdef.org/adblock-fast/')),
-                E('div', {class:'ows-actions'}, [install, open]), feedback.content, native ? native.content : ''
+                E('div', {class:'ows-actions'}, [install, open]), fastSettings, feedback.content, native ? native.content : ''
             ])}
         ]);
         return {

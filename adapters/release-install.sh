@@ -77,12 +77,13 @@ ows_install_release() (
     umask 077
     module=$1
     case "$module" in
-        steer|tg-ws-proxy|netshift) service=$module ;;
+        steer|tg-ws-proxy) service=$module ;;
+        netshift) service=$module; . "$LIB/netshift.sh" ;;
         stgws) service=tgws ;;
         *) exit 1 ;;
     esac
     if [ -x "/etc/init.d/$service" ] &&
-        { [ "$module" != netshift ] || [ -s /usr/share/luci/menu.d/luci-app-netshift.json ]; }; then
+        { [ "$module" != netshift ] || netshift_native_view >/dev/null; }; then
         printf 'Служба %s уже установлена\n' "$service"
         exit 0
     fi
@@ -117,8 +118,8 @@ ows_install_release() (
     ows_install_local_packages "$format" "$@" || exit 1
     [ -x "/etc/init.d/$service" ] ||
         { printf 'После установки служба %s не найдена\n' "$service"; exit 1; }
-    if [ "$module" = netshift ] && [ ! -s /usr/share/luci/menu.d/luci-app-netshift.json ]; then
-        echo 'Пакет NetShift установлен, но штатный интерфейс LuCI не найден'
+    if [ "$module" = netshift ] && ! netshift_native_view >/dev/null; then
+        echo 'Пакет NetShift установлен, но файлы его интерфейса LuCI или конфигурация отсутствуют.'
         exit 1
     fi
     printf 'Пакет %s установлен.\n' "$service"

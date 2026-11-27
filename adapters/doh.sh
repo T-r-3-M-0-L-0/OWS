@@ -35,7 +35,8 @@ doh_info() (
     local installed=false running=false failover=false fallback=false force=false draft report=/dev/null jobs upstream
     local owner=standalone guard=false chain='' active='' native=false initialize=false standalone=false
     [ ! -x /etc/init.d/https-dns-proxy ] || installed=true
-    [ ! -r /usr/share/luci/menu.d/luci-app-https-dns-proxy.json ] || native=true
+    if [ -r /usr/share/luci/menu.d/luci-app-https-dns-proxy.json ] &&
+        [ -s /www/luci-static/resources/view/https-dns-proxy/overview.js ]; then native=true; fi
     if ! command -v jq >/dev/null; then
         printf '{"installed":%s,"native":%s,"limited":true}\n' "$installed" "$native"
         return

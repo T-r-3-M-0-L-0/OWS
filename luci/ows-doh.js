@@ -1,6 +1,7 @@
 'use strict';
 'require baseclass';
 'require rpc';
+'require view.ows-native as nativeView';
 'require view.ows-ui as owsUI';
 
 var info = rpc.declare({object:'ows', method:'doh_info'});
@@ -68,6 +69,9 @@ return baseclass.extend({
         var policy = E('fieldset', {class:'cbi-section', hidden:''});
         var feedback = owsUI.feedback();
         var controls = E('div', {class:'ows-actions'});
+        var native = nativeView.tab({id:'doh-native', route:'ows-native-https-dns-proxy', acl:'luci-app-https-dns-proxy',
+            label:_('Штатные настройки HTTPS DNS Proxy')});
+        native.content.hidden = true;
         var busy = false;
         var state;
 
@@ -75,14 +79,19 @@ return baseclass.extend({
             var managed = state && state.owner === 'ows';
             var migration = state && state.owner === 'zapret-manager' && state.installed;
             var complete = state && state.installed && !state.limited;
+            var nativeAvailable = complete && state.native && !managed;
+            if (!nativeAvailable) native.content.hidden = true;
             policy.disabled = busy || !state || !(state.can_initialize || (managed && state.guard));
             controls.replaceChildren(
                 owsUI.button(_('Обновить состояние'), load, busy),
-                state && (!state.installed || !state.native) ? owsUI.button(state.installed ? _('Установить интерфейс LuCI') : _('Установить DoH'), function() {
+                state && !state.installed ? owsUI.button(_('Установить DoH'), function() {
                     if (window.confirm(_('Установить HTTPS DNS Proxy из репозитория OpenWrt?')))
                         submit('install');
                 }, busy) : '',
-                state && state.native && !managed ? E('a', {href:L.url('admin','services','https-dns-proxy')}, _('Настройки HTTPS DNS Proxy')) : '',
+                nativeAvailable ? owsUI.button(_('Штатные настройки HTTPS DNS Proxy'), function() {
+                    native.content.hidden = false;
+                    return native.activate();
+                }, busy) : '',
                 complete ? owsUI.button(_('Проверить DNS'), function() { submit('check'); }, busy) : '',
                 managed ? owsUI.button(_('Проверить переключение'), function() {
                     if (window.confirm(_('Временно переключить DoH на резерв и вернуться на основной сервер?'))) submit('test-switch');
@@ -187,6 +196,6 @@ return baseclass.extend({
         }
 
         renderActions();
-        return {id:'doh',label:'DoH',activate:load,content:E('div', {}, [summary,policy,resolvers,controls,feedback.content])};
+        return {id:'doh',label:'DoH',activate:load,content:E('div', {}, [summary,policy,resolvers,controls,feedback.content,native.content])};
     }
 });

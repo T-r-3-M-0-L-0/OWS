@@ -25,6 +25,7 @@ var modulePreview = rpc.declare({ object: 'ows', method: 'module_preview', param
 var moduleAttach = rpc.declare({ object: 'ows', method: 'module_attach', params: ['manifest'] });
 var moduleLink = rpc.declare({ object: 'ows', method: 'module_link', params: ['name', 'source'] });
 var moduleInstall = rpc.declare({ object: 'ows', method: 'module_install', params: ['id'] });
+var moduleLinks = rpc.declare({ object: 'ows', method: 'module_links' });
 
 var labels = {
     idle: _('Нет операций'),
@@ -537,6 +538,27 @@ return view.extend({
         var instructionsTab = templates.panel(instructions.tab());
         var registry = adapterCatalog(renderModules);
         var installing = Object.create(null);
+        var linkReport = E('ul', {'aria-live':'polite'});
+        var linkCheck = E('button', {type:'button',class:'cbi-button'}, _('Проверить ссылки модулей'));
+        linkCheck.addEventListener('click', function() {
+            linkCheck.disabled = true;
+            moduleLinks().then(function(data) {
+                var labels = {
+                    ready:_('Доступен'), not_installed:_('Не установлен'), engine_only:_('Управляется из OWS'),
+                    invalid_route:_('Неверный маршрут LuCI'), missing_view:_('Отсутствует файл интерфейса'),
+                    awaiting_configuration:_('Ожидает применения манифеста'),
+                    configuration_unavailable:_('Рабочая конфигурация недоступна'), broken_references:_('Есть отсутствующие файлы'),
+                    invalid_manifest:_('Запись каталога повреждена'), invalid_source:_('Некорректная HTTPS-ссылка'),
+                    source_valid:_('Формат HTTPS-ссылки корректен')
+                };
+                linkReport.replaceChildren.apply(linkReport, data.modules.map(function(item) {
+                    return E('li', {}, (item.label || item.module) + ' · ' + (labels[item.status] || item.status) +
+                        (item.missing > 0 ? ' (' + item.missing + ')' : ''));
+                }));
+            }).catch(function() {
+                linkReport.replaceChildren(E('li', {}, _('Не удалось проверить ссылки модулей.')));
+            }).finally(function() { linkCheck.disabled = false; });
+        });
 
         function installButton(entry) {
             var button = E('button', {class:'cbi-button',type:'button'},
@@ -563,6 +585,11 @@ return view.extend({
         }
 
         var cleanupPanel = templates.panel({id:'legacy-cleanup', content:legacyCleanup.panel(followJob)});
+        var uninstallPanel = E('details', {class:'ows-section'}, [
+            E('summary', {}, _('Удаление OWS и модулей')),
+            E('p', {}, _('Выполните команды по SSH. Первая покажет план. Вторая удалит OWS и установленные встроенные модули.')),
+            E('pre', {}, 'ows-uninstall --check --all-modules\nows-uninstall --apply --all-modules')
+        ]);
         var systemTabs = createTabs(_('Системные модули'), templates.system(followJob));
         var systemPanel = templates.panel({id:'overview-system',content:E('section', {class:'ows-service-preview'}, [
             E('h4', {}, _('Системные модули')), systemTabs.content
@@ -582,7 +609,8 @@ return view.extend({
             };
             var tabs = [
                 { id: 'overview', label: _('Обзор'), activate:systemPanel.activate,
-                    content: [templates.panel({id:'domain-search', content:domainPanel}).content, registry.content, cleanupPanel.content] },
+                    content: [templates.panel({id:'domain-search', content:domainPanel}).content, registry.content,
+                        E('div', {class:'ows-overview'}, [linkCheck, linkReport]), cleanupPanel.content, uninstallPanel] },
                 { id: 'zapret-group', label: _('Zapret'), content: zapretVersions.content, activate: zapretVersions.activate }
             ].map(function(tab) { return templates.panel(tab); });
             tabs.push(instructionsTab);

@@ -64,7 +64,8 @@ enqueue() (
             fi
             [ "$#" = 1 ] || fail 'Usage: ows adblock ACTION'
             case "$1" in
-                prepare|check|refresh|schedule-plan|takeover|refresh-auto|refresh-live|schedule:on|schedule:off|pause|resume|edit|compact|expand|enable-light|install-fast) ;;
+                prepare|check|refresh|schedule-plan|takeover|refresh-auto|refresh-live|schedule:on|schedule:off|pause|resume|edit|compact|expand|enable-light|install-fast|fast-refresh) ;;
+                fast-save:*) . "$LIB/adblock-fast.sh"; adblock_fast_selection_valid "${1#fast-save:}" || fail 'Invalid AdBlock Fast selection' ;;
                 configure:*) . "$LIB/adblock-update.sh"; adblock_valid_selection "${1#configure:}" || fail 'Invalid adblock selection' ;;
                 *) fail 'Unknown adblock action' ;;
             esac
@@ -304,6 +305,8 @@ process_module() {
                         expand) . "$LIB/adblock-storage.sh"; adblock_storage_expand ;;
                         enable-light) adblock_enable_light ;;
                         install-fast) . "$LIB/packages.sh"; adblock_install_fast ;;
+                        fast-save:*) . "$LIB/vpn.sh"; . "$LIB/adblock-fast.sh"; adblock_fast_save "${action#fast-save:}" ;;
+                        fast-refresh) . "$LIB/adblock-fast.sh"; adblock_fast_refresh ;;
                         refresh-auto|refresh-live|schedule:*|pause|resume|configure:*|edit)
                             adblock_live_command "$action" "$JOBS/$id/payload"
                             ;;
@@ -517,6 +520,9 @@ recover_worker() {
         . "$LIB/adblock-policy.sh"
         . "$LIB/adblock-live.sh"
         adblock_live_recover || fail 'Pending adblock transaction needs recovery'
+        . "$LIB/vpn.sh"
+        . "$LIB/adblock-fast.sh"
+        adblock_fast_recover || fail 'Pending AdBlock Fast transaction needs recovery'
     fi
     if [ -r "$LIB/vpn.sh" ]; then
         ( . "$LIB/vpn.sh"; ows_vpn_recover "$LIB" ) || fail 'Pending VPN transaction needs recovery'
@@ -601,6 +607,11 @@ case "${1:-}" in
     tg-ws-proxy) shift; enqueue tg-ws-proxy "$@" ;;
     adblock) shift; enqueue adblock "$@" ;;
     doh) shift; enqueue doh "$@" ;;
+    module-links)
+        [ "$#" = 1 ] || fail 'Usage: ows module-links'
+        . "$LIB/module-links.sh"
+        ows_module_links
+        ;;
     cleanup)
         case "$#:${2:-}" in
             2:preview) . "$LIB/legacy-cleanup.sh"; legacy_cleanup_preview ;;

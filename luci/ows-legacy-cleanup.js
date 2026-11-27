@@ -28,6 +28,13 @@ return baseclass.extend({
             summary.textContent = _('Проверяем файлы и зависимости…');
             results.replaceChildren();
             return preview().then(owsUI.checked).then(function(data) {
+                if (!Array.isArray(data.paths) || typeof data.ready !== 'boolean' ||
+                    !data.paths.every(function(item) {
+                        return item && typeof item.path === 'string' && typeof item.removable === 'boolean';
+                    }) || data.ready !== data.paths.some(function(item) { return item.removable; }) ||
+                    (data.ready && !/^[0-9a-f]{64}$/.test(data.revision))) {
+                    throw new Error(_('OWS вернул неполный план очистки. Повторите проверку.'));
+                }
                 plan = data;
                 summary.textContent = data.ready ? _('Проверьте список перед удалением.') : data.paths.length ?
                     _('Сейчас очистка недоступна. Причины указаны в списке.') : _('Известных остатков Zapret-Manager не найдено.');

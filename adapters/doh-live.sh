@@ -123,14 +123,17 @@ doh_dnsmasq_uses_local() {
 
 doh_install_package() (
     local fresh=0
-    if [ ! -x "$OWS_DOH_INIT" ]; then
-        [ -z "$(uci -q changes dhcp)$(uci -q changes https-dns-proxy)" ] ||
-            { echo 'Сохраните правки DNS перед установкой DoH.'; exit 1; }
-        if [ ! -e "$OWS_DOH_CONFIG" ]; then fresh=1; fi
+    if [ -x "$OWS_DOH_INIT" ]; then
+        echo 'HTTPS DNS Proxy уже установлен.'
+        exit 0
     fi
-    ows_install_repo_packages https-dns-proxy luci-app-https-dns-proxy || exit 1
+    [ -z "$(uci -q changes dhcp)$(uci -q changes https-dns-proxy)" ] ||
+        { echo 'Сохраните правки DNS перед установкой DoH.'; exit 1; }
+    if [ ! -e "$OWS_DOH_CONFIG" ]; then fresh=1; fi
+    ows_install_repo_packages https-dns-proxy || exit 1
+    [ -x "$OWS_DOH_INIT" ] || { echo 'Служба HTTPS DNS Proxy не найдена после установки.'; exit 1; }
     [ "$fresh" = 1 ] || exit 0
-    [ -x "$OWS_DOH_INIT" ] && "$OWS_DOH_INIT" disable &&
+    "$OWS_DOH_INIT" disable &&
         timeout 20 "$OWS_DOH_INIT" stop 9>&- && ! doh_proxy_running || exit 1
     uci -q set https-dns-proxy.config.force_dns=0 && uci -q commit https-dns-proxy
 )
