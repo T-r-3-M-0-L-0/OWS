@@ -1,13 +1,15 @@
 'use strict';
 'require baseclass';
-'require view.ows-dns as dns';
+'require view.ows-ui as owsUI';
 'require view.ows-service as serviceView';
-'require view.ows-stgws as stgws';
 'require view.ows-system-templates as systemTemplates';
-'require view.ows-vpn-panel as vpn';
 
 function vpnTab(entry, context, template) {
-    return vpn.tab(entry, context.createTabs, context.followJob, template);
+    return owsUI.deferredTab('module-' + entry.id, entry.name, function() {
+        return L.require('view.ows-vpn-panel').then(function(vpn) {
+            return vpn.tab(entry, context.createTabs, context.followJob, template);
+        });
+    });
 }
 
 var defaults = {
@@ -74,7 +76,9 @@ var defaults = {
         installConfirmation: _('Установить AdBlock Fast из репозитория OpenWrt? Пакет может запустить фильтрацию.'),
         native: { route: 'ows-native-adblock-fast', acl: 'luci-app-adblock-fast' },
         tab: function(entry, context, template) {
-            return dns.adblockTab(entry, context, template.native);
+            return owsUI.deferredTab('module-' + entry.id, entry.name, function() {
+                return L.require('view.ows-dns').then(function(dns) { return dns.adblockTab(entry, context, template.native); });
+            });
         }
     },
     stgws: {
@@ -82,7 +86,11 @@ var defaults = {
         group: 'telegram-proxy',
         install: true,
         sourceLabel: _('Скрипт автора'),
-        tab: function(entry, context) { return stgws.tab(entry, context.createTabs, context.followJob); }
+        tab: function(entry, context) {
+            return owsUI.deferredTab('module-stgws', entry.name, function() {
+                return L.require('view.ows-stgws').then(function(stgws) { return stgws.tab(entry, context.createTabs, context.followJob); });
+            });
+        }
     }
 };
 
@@ -126,7 +134,7 @@ return baseclass.extend({
     },
 
     resolve: function(entry, drivers) {
-        var isVPN = vpn.supports(entry, drivers);
+        var isVPN = Object.prototype.hasOwnProperty.call(drivers, entry.id) && drivers[entry.id] === entry.service;
         var standard = matched(defaults, entry);
         var override = matched(this.overrides && this.overrides.modules, entry);
         var group = isVPN ? 'vpn' : entry.category === 'proxy' ? 'telegram-proxy' : entry.category;

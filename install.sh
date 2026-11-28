@@ -43,8 +43,7 @@ adapters/queue-metrics.sh /usr/lib/ows/queue-metrics.sh 644
 adapters/zapret-module.sh /usr/lib/ows/zapret-module.sh 644
 adapters/zapret2-reference.sh /usr/lib/ows/zapret2-reference.sh 644
 modules/zapret2/zapret2-safe.sh /usr/lib/ows/zapret2-safe.sh 755
-modules/zapret2/defaults/main.uci /usr/lib/ows/zapret2-default-main.uci 644
-modules/zapret2/defaults/profiles.uci /usr/lib/ows/zapret2-default-profiles.uci 644
+modules/zapret2 /usr/lib/ows/zapret2-reference.tar.gz archive
 modules/zapret2/tools/tspu-test /usr/lib/ows/tspu-test 755
 modules/zapret2/tools/TSPU-CLASS-TEST-LICENSE /usr/lib/ows/TSPU-CLASS-TEST-LICENSE 644
 adapters/packages.sh /usr/lib/ows/packages.sh 644
@@ -73,6 +72,7 @@ adapters/steer-migration.sh /usr/lib/ows/steer-migration.sh 644
 adapters/steer-editor.sh /usr/lib/ows/steer-editor.sh 644
 adapters/steer-handover.sh /usr/lib/ows/steer-handover.sh 644
 adapters/steer-live.sh /usr/lib/ows/steer-live.sh 644
+adapters/steer-recovery.sh /usr/lib/ows/steer-recovery.sh 644
 adapters/steer-catalog.sh /usr/lib/ows/steer-catalog.sh 644
 adapters/steer-sources.sh /usr/lib/ows/steer-sources.sh 644
 adapters/steer-apply.sh /usr/lib/ows/steer-apply.sh 644
@@ -88,21 +88,6 @@ uninstall.sh /usr/sbin/ows-uninstall 755
 openwrt/ows.init /etc/init.d/ows 755
 FILES
     local asset
-    for asset in "$SRC"/modules/zapret2/ui/*; do
-        printf 'modules/zapret2/ui/%s /usr/lib/ows/zapret2-ui-%s 644\n' "${asset##*/}" "${asset##*/}"
-    done
-    for asset in "$SRC"/modules/zapret2/defaults/lists/*.txt; do
-        printf 'modules/zapret2/defaults/lists/%s /usr/lib/ows/zapret2-list-%s 644\n' "${asset##*/}" "${asset##*/}"
-    done
-    for asset in "$SRC"/modules/zapret2/defaults/lua/*.lua; do
-        printf 'modules/zapret2/defaults/lua/%s /usr/lib/ows/zapret2-lua-%s 644\n' "${asset##*/}" "${asset##*/}"
-    done
-    for asset in "$SRC"/modules/zapret2/defaults/blobs/*.bin; do
-        printf 'modules/zapret2/defaults/blobs/%s /usr/lib/ows/zapret2-blob-%s 644\n' "${asset##*/}" "${asset##*/}"
-    done
-    for asset in "$SRC"/modules/zapret2/defaults/presets/*.txt; do
-        printf 'modules/zapret2/defaults/presets/%s /usr/lib/ows/zapret2-preset-%s 644\n' "${asset##*/}" "${asset##*/}"
-    done
     for asset in "$SRC"/modules/zapret2/tools/*.sh; do
         printf 'modules/zapret2/tools/%s /usr/lib/ows/%s 755\n' "${asset##*/}" "${asset##*/}"
     done
@@ -157,11 +142,33 @@ FILES
     fi
 }
 
+# The preflight also verifies the unpacked files used to build the archive.
+zapret2_reference_files() {
+    local base=$SRC/modules/zapret2 path
+    printf '%s\n' "$base/defaults/main.uci" "$base/defaults/profiles.uci"
+    for path in "$base"/ui/* "$base"/defaults/lists/*.txt "$base"/defaults/lua/*.lua \
+        "$base"/defaults/blobs/*.bin "$base"/defaults/presets/*.txt; do
+        printf '%s\n' "$path"
+    done
+}
+
+prune_zapret2_reference_files() {
+    local source name target
+    zapret2_reference_files | while IFS= read -r source; do
+        name=$(zapret2_reference_legacy_name "${source#"$SRC"/modules/zapret2/}") || exit 1
+        target=/usr/lib/ows/$name
+        [ -f "$target" ] && [ ! -L "$target" ] && cmp -s "$source" "$target" || continue
+        mkdir -p "$backup/usr/lib/ows" && cp -p "$target" "$backup$target" &&
+            printf '%s\n' "$target" >> "$touched" && rm -f "$target" || exit 1
+    done
+}
+
 [ "$(id -u)" = 0 ] || fail 'Install as root'
 [ -x /etc/rc.common ] || fail 'OpenWrt init system is required'
 [ -s "$SRC/adapters/packages.sh" ] || fail 'Missing adapters/packages.sh'
 [ -s "$SRC/adapters/upgrade-retention.sh" ] || fail 'Missing adapters/upgrade-retention.sh'
 . "$SRC/adapters/packages.sh"
+. "$SRC/adapters/zapret2-reference.sh"
 required_tools='uci flock pgrep cmp mktemp dd sha256sum tail jq timeout'
 if [ "$upgrade" = 1 ]; then
     [ -x /usr/sbin/ows ] && [ -x /etc/init.d/ows ] && [ -d /etc/ows ] ||
@@ -185,7 +192,14 @@ fi
 
 files=$(file_list)
 while read -r source path mode; do
-    [ -s "$SRC/$source" ] || fail "Missing $source"
+    if [ "$mode" = archive ]; then
+        command -v tar >/dev/null && command -v gzip >/dev/null || fail 'Zapret2 assets require tar and gzip'
+        zapret2_reference_files | while IFS= read -r asset; do
+            [ -f "$asset" ] && [ ! -L "$asset" ] && [ -s "$asset" ] || fail "Missing $asset"
+        done || exit 1
+    else
+        [ -s "$SRC/$source" ] || fail "Missing $source"
+    fi
     case "$source" in *.sh|*.init|*.rpc|bin/ows|*/tspu-test) sh -n "$SRC/$source" || exit 1 ;; esac
     if [ "$mode" = keep ]; then continue; fi
     if [ -L "$path" ] || { [ -e "$path" ] && { [ "$upgrade" = 0 ] || [ ! -f "$path" ]; }; }; then
@@ -228,6 +242,8 @@ atomic_copy() (
     trap 'rm -f "$temp"' EXIT
     if [ "$mode" = restore ]; then
         cp -p "$source" "$temp" || exit 1
+    elif [ "$mode" = archive ]; then
+        tar -czf "$temp" -C "$source" ui defaults && gzip -t "$temp" && chmod 644 "$temp" || exit 1
     else
         cp "$source" "$temp" && chmod "$mode" "$temp" || exit 1
     fi
@@ -342,6 +358,7 @@ if [ "$was_running" = 1 ] || [ "$upgrade" = 0 ]; then
     done
     /etc/init.d/ows status 7>&- 8>&- >/dev/null 2>&1 || fail 'OWS worker did not start'
 fi
+if [ "$upgrade" = 1 ]; then prune_zapret2_reference_files || fail 'Could not archive previous loose Zapret2 files'; fi
 trap - EXIT HUP INT TERM
 if [ "$upgrade" = 1 ]; then
     if archived=$(archive_upgrade); then

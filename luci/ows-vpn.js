@@ -10,9 +10,6 @@ var output = rpc.declare({ object: 'ows', method: 'job_output', params: ['job'] 
 var edit = rpc.declare({ object: 'ows', method: 'vpn_edit', params: ['id', 'change'] });
 var subscriptionUrl = rpc.declare({ object: 'ows', method: 'vpn_subscription_url', params: ['id'] });
 return baseclass.extend({
-    supports: function(entry, drivers) {
-        return Object.prototype.hasOwnProperty.call(drivers, entry.id) && drivers[entry.id] === entry.service;
-    },
     tab: function(entry, createTabs, follow, template) {
         template = template || {};
         var status = E('div');
@@ -36,6 +33,7 @@ return baseclass.extend({
         function submit(action, target, change, onResult) {
             if (busy) return;
             if (action === 'takeover' && !window.confirm(_('Передать управление этим модулем в OWS?'))) return;
+            if (action === 'fallback_on' && !window.confirm(_('Разрешить прямой трафик при сбое steer? Резерв доступен, если все выходы разрешают прямой трафик при отказе.'))) return;
             busy = true;
             notice.textContent = _('Ставим проверку в очередь');
             log.hidden = true;
@@ -59,7 +57,8 @@ return baseclass.extend({
                         if (onResult) onResult({output:notice.textContent}, 'operation_failed');
                     }).finally(function() { busy = false; });
                     if ((change && result.phase === 'done') || ['setup', 'prepare_migration', 'check_handover', 'refresh_draft_subscription',
-                        'refresh_live_subscription', 'refresh_live_lists', 'test_draft_lists', 'takeover', 'apply_draft'].indexOf(action) >= 0) {
+                        'refresh_live_subscription', 'refresh_live_lists', 'test_draft_lists', 'takeover', 'apply_draft',
+                        'fallback_on', 'fallback_off', 'fallback_restore'].indexOf(action) >= 0) {
                         configEditor.refresh();
                         load();
                     }
@@ -352,6 +351,17 @@ return baseclass.extend({
             var showNative = !!(native && (!native.visible || native.visible(data)));
             mountTabs(ui, abilities, hasSubscription, !!handover.ownership_transferred, showNative, data);
             status.replaceChildren.apply(status, statusPanel(data, outputName, abilities.diagnose));
+            var recovery = data.recovery;
+            if (recovery && (recovery.supported || recovery.active)) {
+                status.appendChild(E('p', {}, recovery.active ? (recovery.verified ?
+                    _('Работает обычная маршрутизация') : _('Резервная маршрутизация ещё не подтверждена')) :
+                    recovery.allowed ? _('Резерв при сбое steer разрешён') : _('Резерв при сбое steer выключен')));
+                status.appendChild(E('div', {class:'ows-actions'}, [
+                    button(recovery.allowed ? _('Выключить резерв steer') : _('Разрешить резерв steer'),
+                        recovery.allowed ? 'fallback_off' : 'fallback_on', recovery.supported),
+                    recovery.active ? button(_('Попробовать восстановить steer'), 'fallback_restore', recovery.supported) : ''
+                ]));
+            }
             if (abilities.setup) status.appendChild(button(_('Подготовить чистые настройки'), 'setup', true));
             if (data.standalone_draft && !data.configured)
                 status.appendChild(E('p', {}, _('Чтобы запустить маршрутизацию, добавьте сервис, проверьте изменения и нажмите «Применить манифест».')));

@@ -48,25 +48,49 @@ zapret2_reference_copy() (
     cp "$source" "$file" && chmod "${3:-644}" "$file" && mv -f "$file" "$target"
 )
 
-zapret2_reference_luci() {
-    local path=/www/luci-static/resources/view/zapret2 asset
-    [ -s "$path/loader.js" ] || return 1
-    for asset in main.js lists.js app.js service.js loader.js version.json; do
-        zapret2_reference_copy "$LIB/zapret2-ui-$asset" "$path/$asset" || return 1
-    done
-    if [ ! -e /opt/zapret2/healthcheck.sh ]; then
-        zapret2_reference_copy "$LIB/healthcheck.sh" /opt/zapret2/healthcheck.sh 755 || return 1
-    fi
-    zapret2_reference_copy "$LIB/zapret2-ui-acl.json" /usr/share/rpcd/acl.d/luci-app-zapret2.json &&
-        /etc/init.d/rpcd reload
+zapret2_reference_legacy_name() {
+    local prefix
+    case "$1" in
+        ui/*) prefix=ui ;; defaults/lists/*) prefix=list ;; defaults/lua/*) prefix=lua ;;
+        defaults/blobs/*) prefix=blob ;; defaults/presets/*) prefix=preset ;; defaults/*.uci) prefix=default ;;
+        *) return 1 ;;
+    esac
+    printf 'zapret2-%s-%s\n' "$prefix" "${1##*/}"
 }
 
+zapret2_reference_unpack() {
+    local directory=$1 file legacy
+    shift
+    mkdir -p "$directory" && tar -xzf "$LIB/zapret2-reference.tar.gz" -C "$directory" "$@" || return 1
+    for file in "$directory"/ui/* "$directory"/defaults/*.uci "$directory"/defaults/lists/* \
+        "$directory"/defaults/lua/* "$directory"/defaults/blobs/* "$directory"/defaults/presets/*; do
+        [ -f "$file" ] && [ ! -L "$file" ] || continue
+        legacy=$(zapret2_reference_legacy_name "${file#"$directory"/}") || return 1
+        if [ -f "$LIB/$legacy" ] && [ ! -L "$LIB/$legacy" ]; then cp -p "$LIB/$legacy" "$file" || return 1; fi
+    done
+}
+
+zapret2_reference_luci() (
+    local path=/www/luci-static/resources/view/zapret2 asset work
+    [ -s "$path/loader.js" ] || return 1
+    work=$(mktemp -d "$RUN/.zapret2-luci.XXXXXX") || exit 1
+    trap 'rm -rf "$work"' EXIT
+    zapret2_reference_unpack "$work" ui || exit 1
+    for asset in main.js lists.js app.js service.js loader.js version.json; do
+        zapret2_reference_copy "$work/ui/$asset" "$path/$asset" || exit 1
+    done
+    if [ ! -e /opt/zapret2/healthcheck.sh ]; then
+        zapret2_reference_copy "$LIB/healthcheck.sh" /opt/zapret2/healthcheck.sh 755 || exit 1
+    fi
+    zapret2_reference_copy "$work/ui/acl.json" /usr/share/rpcd/acl.d/luci-app-zapret2.json &&
+        /etc/init.d/rpcd reload
+)
+
 zapret2_reference_resources() {
-    local prefix=$1 directory=$2 file name target
+    local source=$1 directory=$2 file target
     [ ! -L "$directory" ] && (umask 022; mkdir -p "$directory") || return 1
-    for file in "$LIB"/"$prefix"*; do
-        name=${file##*/}
-        target=$directory/${name#"$prefix"}
+    for file in "$source"/*; do
+        target=$directory/${file##*/}
         [ ! -L "$target" ] || return 1
         if [ -f "$target" ] && [ -s "$target" ]; then continue; fi
         [ ! -e "$target" ] || [ -f "$target" ] || return 1
@@ -87,7 +111,7 @@ zapret2_reference_merge_main() {
             case "$main" in
                 '')
                     printf '\n' >> "$candidate/uci/zapret2" &&
-                        cat "$LIB/zapret2-default-main.uci" >> "$candidate/uci/zapret2"
+                        cat "$1" >> "$candidate/uci/zapret2"
                     return
                     ;;
                 *'
@@ -107,18 +131,20 @@ zapret2_reference_merge_main() {
 }
 
 zapret2_reference_defaults() (
-    local mode=${1:-fresh} file target candidate
+    local mode=${1:-fresh} file target candidate assets
     . "$LIB/zapret2.sh"
     [ -f "$CONFIG" ] && [ ! -L "$CONFIG" ] || { echo 'Конфигурация Zapret2 отсутствует'; exit 1; }
     zapret2_no_pending_changes ||
         { echo 'Сохраните или сбросьте черновик Zapret2 в LuCI или UCI.'; exit 1; }
     candidate=$(mktemp -d "$RUN/.zapret2-defaults.XXXXXX") || exit 1
     trap 'rm -rf "$candidate"' EXIT
+    zapret2_reference_unpack "$candidate" defaults || exit 1
+    assets=$candidate/defaults
     cp -p "$CONFIG" "$candidate/previous" || exit 1
     case "$mode" in
         fresh)
             awk '/^config[[:space:]]+/ { keep=($2=="zapret2") } keep' "$candidate/previous" > "$candidate/candidate" &&
-                cat "$LIB/zapret2-default-profiles.uci" >> "$candidate/candidate" || exit 1
+                cat "$assets/profiles.uci" >> "$candidate/candidate" || exit 1
             ;;
         merge)
             mkdir "$candidate/uci" "$candidate/override" "$candidate/delta" || exit 1
@@ -126,7 +152,7 @@ zapret2_reference_defaults() (
             staged() { uci -q -c "$candidate/uci" -C "$candidate/override" -t "$candidate/delta" "$@"; }
             staged show zapret2 > "$candidate/sections" ||
                 { echo 'Не удалось прочитать UCI-конфигурацию Zapret2'; exit 1; }
-            zapret2_reference_merge_main &&
+            zapret2_reference_merge_main "$assets/main.uci" &&
                 staged show zapret2 > "$candidate/sections" &&
                 cp -p "$candidate/uci/zapret2" "$candidate/candidate" || exit 1
             awk -F= '
@@ -145,14 +171,14 @@ zapret2_reference_defaults() (
                     if (keep) print ""
                 }
                 keep { print }
-            ' "$candidate/sections" "$LIB/zapret2-default-profiles.uci" >> "$candidate/candidate" || exit 1
+            ' "$candidate/sections" "$assets/profiles.uci" >> "$candidate/candidate" || exit 1
             ;;
         *) exit 1 ;;
     esac
     [ ! -L /opt/zapret2 ] && [ ! -L /opt/zapret2/files ] || exit 1
-    zapret2_reference_resources zapret2-list- /opt/zapret2/ipset &&
-        zapret2_reference_resources zapret2-lua- /opt/zapret2/lua &&
-        zapret2_reference_resources zapret2-blob- /opt/zapret2/files/fake || exit 1
+    zapret2_reference_resources "$assets/lists" /opt/zapret2/ipset &&
+        zapret2_reference_resources "$assets/lua" /opt/zapret2/lua &&
+        zapret2_reference_resources "$assets/blobs" /opt/zapret2/files/fake || exit 1
     for file in zapret_hosts_auto.txt zapret_hosts_user.txt zapret_hosts_user_exclude.txt \
         list-general-user.txt list-exclude-user.txt ipset-exclude-user.txt; do
         target=/opt/zapret2/ipset/$file
@@ -166,8 +192,8 @@ zapret2_reference_defaults() (
         write_config "$candidate/candidate" || exit 1
     fi
     [ ! -L /etc/zapret2-presets ] && mkdir -p /etc/zapret2-presets || exit 1
-    for file in "$LIB"/zapret2-preset-*.txt; do
-        target=/etc/zapret2-presets/${file##*zapret2-preset-}
+    for file in "$assets/presets"/*.txt; do
+        target=/etc/zapret2-presets/${file##*/}
         [ ! -L "$target" ] || exit 1
         [ -f "$target" ] || zapret2_reference_copy "$file" "$target" || exit 1
     done

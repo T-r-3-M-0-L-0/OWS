@@ -9,6 +9,7 @@ OWS_STEER_SPEC=/etc/steer/spec.json
 . /usr/lib/ows/steer-sources.sh
 . /usr/lib/ows/steer-apply.sh
 . /usr/lib/ows/steer-setup.sh
+. /usr/lib/ows/steer-recovery.sh
 
 steer_recover() { steer_initial_recover && steer_live_recover && steer_apply_recover; }
 steer_subscription_url() { steer_subscription_status reveal; }
@@ -16,7 +17,7 @@ steer_subscription_url() { steer_subscription_status reveal; }
 steer_action_allowed() {
     case "$1" in
         diag|setup|prepare-migration|edit|check-handover|refresh-draft-subscription|\
-        test-draft-lists|takeover|refresh-live-lists|refresh-live-subscription|import-sources) return 0 ;;
+        test-draft-lists|takeover|refresh-live-lists|refresh-live-subscription|import-sources|watch|fallback:on|fallback:off|fallback:restore) return 0 ;;
         preview-draft:*|apply-draft:*)
             local revision=${1#*:}
             case "$revision" in *[!a-f0-9]*) return 1 ;; esac
@@ -115,6 +116,7 @@ steer_info() {
         --argjson spec "$spec" --argjson diag "$diag" --argjson vless "$vless" --argjson hy2 "$hy2" --argjson proxy "$proxy" \
         --argjson migration "$migration" --argjson handover "$handover" --argjson subscription "$subscription" \
         --argjson draft_apply "$draft_apply" \
+        --argjson recovery "$(steer_recovery_state)" \
         --argjson setup "$setup" --argjson standalone_draft "$standalone_draft" \
         --slurpfile labels /usr/lib/ows/steer-outputs.json '
         include "ows-json";
@@ -171,6 +173,7 @@ steer_info() {
                 refresh_live: ($handover.ownership_transferred==true),
                 refresh_live_lists: ($handover.ownership_transferred==true)
             },
+            recovery:$recovery,
             migration: $migration,
             handover: $handover,
             draft_apply: $draft_apply,
@@ -256,6 +259,9 @@ steer_execute() {
     steer_action_allowed "$action" || return 1
     case "$action" in
         setup) steer_setup_draft; return ;;
+        watch) steer_recovery_watch; return ;;
+        fallback:on|fallback:off) steer_set_direct "${action#fallback:}"; return ;;
+        fallback:restore) steer_recovery_owned && steer_direct_active && steer_try_restore; return ;;
         edit)
             case "$(jq -r '.type' "${2:-}")" in
                 subscription_set|subscription_remove) steer_subscription_edit "$2" ;;

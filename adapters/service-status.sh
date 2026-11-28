@@ -80,6 +80,7 @@ ows_services_status() (
     . /usr/lib/ows/system.sh
     . /usr/lib/ows/adblock-migration.sh
     . /usr/lib/ows/adblock-live.sh
+    . /usr/lib/ows/doh-live.sh
     local runtime errors id name unit state path
     local known=' dnsmasq zapret zapret2 steer netshift tgws tg-ws-proxy https-dns-proxy adblock-fast zram '
     runtime=$(ubus -S -t 2 call service list 2>/dev/null) || runtime=''
@@ -90,6 +91,19 @@ ows_services_status() (
         [ -x "/etc/init.d/$unit" ] || continue
         case "$id" in
             zapret2) state=$(ows_service_zapret2) ;;
+            doh)
+                case "$(doh_dns_mode)" in
+                    ordinary) state=ordinary_dns ;;
+                    unavailable) state=dns_unavailable ;;
+                    *) state=$(ows_service_runtime "$unit") ;;
+                esac
+                ;;
+            steer)
+                if [ -d /etc/ows/steer-live/direct ]; then
+                    if [ -f /tmp/ows/steer-direct-ok ] && [ ! -e /etc/steer/spec.json ]; then state=direct_routing
+                    else state=route_unavailable; fi
+                else state=$(ows_service_runtime "$unit"); fi
+                ;;
             netshift)
                 state=$(ows_service_runtime sing-box)
                 case "$state" in

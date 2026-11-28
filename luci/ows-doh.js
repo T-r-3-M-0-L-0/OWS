@@ -99,6 +99,10 @@ return baseclass.extend({
                 managed && state.standalone_setup ? owsUI.button(state.failover ? _('Выключить автопереключение') : _('Включить автопереключение'), function() {
                     submit(state.failover ? 'auto:off' : 'auto:on');
                 }, busy || !state.guard) : '',
+                managed ? owsUI.button(state.direct_fallback ? _('Запретить обычный DNS при сбое') : _('Разрешить обычный DNS при сбое'), function() {
+                    if (state.direct_fallback || window.confirm(_('При отказе всех DoH разрешить временно использовать обычный DNS для клиентов?')))
+                        submit(state.direct_fallback ? 'fallback:off' : 'fallback:on');
+                }, busy || !state.guard) : '',
                 migration ? owsUI.button(_('Собрать черновик'), function() { submit('prepare'); }, busy) : '',
                 migration ? owsUI.button(_('Сверить черновик'), function() { submit('verify'); }, busy || !state.migration.prepared) : '',
                 migration ? owsUI.button(_('Передать резервирование OWS'), function() {
@@ -168,7 +172,9 @@ return baseclass.extend({
                     [_('Автопереключение'), data.owner === 'ows' && !data.guard ? _('Приостановлено') : enabled(data.failover)],
                     [_('Владелец watchdog'), data.owner === 'ows' ? (data.guard ? 'OWS' : _('OWS · проверьте скрипты и расписание Zapret-Manager')) :
                         data.owner === 'zapret-manager' ? 'Zapret-Manager' : _('Не настроен')],
-                    [_('Активный провайдер'), providerName(data.active)],
+                    [_('Режим DNS'), {ordinary:_('Работает обычный DNS'),unavailable:_('DNS не прошёл проверку'),
+                        encrypted:_('DoH')}[data.dns_mode]],
+                    [_('Активный провайдер'), data.dns_mode === 'ordinary' ? '' : providerName(data.active)],
                     [_('Цепочка провайдеров'), data.providers.map(providerName).join(' → ')],
                     [_('Обычный DNS при сбое'), enabled(data.direct_fallback)],
                     [_('Задания Zapret-Manager'), data.owner === 'zapret-manager' ? data.legacy_jobs : ''],

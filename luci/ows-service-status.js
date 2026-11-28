@@ -22,6 +22,10 @@ return baseclass.extend({
             paused: _('Выключена'),
             partial: _('Часть экземпляров остановлена'),
             no_rules: _('Рабочие правила или список отсутствуют'),
+            ordinary_dns: _('Работает обычный DNS'),
+            dns_unavailable: _('DNS не прошёл проверку'),
+            direct_routing: _('Работает обычная маршрутизация'),
+            route_unavailable: _('Обычная маршрутизация не подтверждена'),
             unknown: _('Состояние недоступно')
         };
         var errors = {

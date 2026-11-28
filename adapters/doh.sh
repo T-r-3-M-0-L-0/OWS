@@ -33,7 +33,7 @@ doh_draft() { ows_latest_draft "$OWS_DOH_STATE"; }
 
 doh_info() (
     local installed=false running=false failover=false fallback=false force=false draft report=/dev/null jobs upstream
-    local owner=standalone guard=false chain='' active='' native=false initialize=false standalone=false
+    local owner=standalone guard=false chain='' active='' native=false initialize=false standalone=false dns_mode=encrypted
     [ ! -x /etc/init.d/https-dns-proxy ] || installed=true
     if [ -r /usr/share/luci/menu.d/luci-app-https-dns-proxy.json ] &&
         [ -s /www/luci-static/resources/view/https-dns-proxy/overview.js ]; then native=true; fi
@@ -58,6 +58,8 @@ doh_info() (
         if doh_auto_enabled; then failover=true; fi
         if doh_standalone; then standalone=true; fi
         fallback=false
+        if doh_plain_allowed; then fallback=true; fi
+        dns_mode=$(doh_dns_mode)
         if doh_guard_intact; then guard=true; fi
         chain=$(cut -f 1 "$OWS_DOH_LIVE/providers" 2>/dev/null || :)
         active=$(doh_current_id "$OWS_DOH_LIVE/providers" || :)
@@ -66,11 +68,11 @@ doh_info() (
         --argjson failover "$failover" --argjson fallback "$fallback" --argjson force "$force" \
         --argjson jobs "$jobs" --arg upstream "$upstream" --slurpfile draft "$report" \
         --arg owner "$owner" --argjson guard "$guard" --arg chain "$chain" --arg active "$active" \
-        --argjson initialize "$initialize" --argjson standalone "$standalone" \
+        --argjson initialize "$initialize" --argjson standalone "$standalone" --arg dns_mode "$dns_mode" \
         --arg catalog "$(doh_catalog)" '
         {installed:$installed,running:$running,native:$native,failover:$failover,direct_fallback:$fallback,
          force_dns:$force,legacy_jobs:$jobs,upstreams:($upstream|split("\n")|map(select(length>0))),
-         owner:$owner,guard:$guard,active:$active,can_initialize:$initialize,standalone_setup:$standalone,
+         owner:$owner,guard:$guard,active:$active,can_initialize:$initialize,standalone_setup:$standalone,dns_mode:$dns_mode,
          providers:($chain|split("\n")|map(select(length>0))),
          available_providers:($catalog|split("\n")|map(select(length>0)|split("|")|
              {id:.[0],family:.[1],label:.[2],kind:.[3],url:.[4],description:(.[6] // "")})),

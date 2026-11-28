@@ -3,6 +3,7 @@
 OWS_DOH_LIVE=/etc/ows/doh-live
 OWS_DOH_CONFIG=/etc/config/https-dns-proxy
 OWS_DOH_INIT=/etc/init.d/https-dns-proxy
+OWS_DOH_DNSMASQ_INIT=/etc/init.d/dnsmasq
 OWS_DOH_RUNTIME=/tmp/ows-doh-watch
 OWS_DOH_LEGACY_LOCK=/tmp/zm-doh-failover.lock
 OWS_DOH_CATALOG=/usr/lib/ows/doh-providers.txt
@@ -10,6 +11,8 @@ OWS_DOH_CATALOG=/usr/lib/ows/doh-providers.txt
 doh_owned() { [ -f "$OWS_DOH_LIVE/owner" ]; }
 doh_standalone() { grep -Fxq standalone "$OWS_DOH_LIVE/owner" 2>/dev/null; }
 doh_auto_enabled() { ! doh_standalone || [ -f "$OWS_DOH_LIVE/auto" ]; }
+doh_plain_allowed() { [ -f "$OWS_DOH_LIVE/plain-allowed" ]; }
+doh_plain_active() { [ -f "$OWS_DOH_LIVE/plain-active" ]; }
 doh_setting() { awk -F= -v key="$2" '$1==key {value=substr($0,length($1)+2)} END {print value}' "$1"; }
 
 doh_catalog() {
@@ -201,7 +204,9 @@ doh_set_auto() {
     doh_standalone && doh_guard_intact || return 1
     case "$1" in
         on) touch "$OWS_DOH_LIVE/auto" ;;
-        off) rm -f "$OWS_DOH_LIVE/auto" ;;
+        off)
+            if doh_plain_active; then echo 'Сначала отключите резервный обычный DNS.'; return 1; fi
+            rm -f "$OWS_DOH_LIVE/auto" "$OWS_DOH_RUNTIME/counters" "$OWS_DOH_RUNTIME/local-unavailable" ;;
         *) return 1 ;;
     esac
 }
@@ -290,6 +295,7 @@ EOF
 doh_configure() (
     local change=$1 order=${1#*:} live="$OWS_DOH_LIVE/providers" work primary current active
     doh_owned && doh_guard_intact || { echo 'Управление DoH недоступно. Обновите состояние.'; exit 1; }
+    if doh_plain_active; then echo 'Отключите временный обычный DNS перед изменением цепочки.'; exit 1; fi
     doh_configure_valid "$change" || { echo 'Выберите основной профиль DoH и от одного до трёх резервных без повторов.'; exit 1; }
     [ "$(doh_policy_order "$live")" = "${change%%:*}" ] || { echo 'Цепочка уже изменилась. Обновите состояние.'; exit 1; }
     [ "${change%%:*}" != "$order" ] || { echo 'Цепочка уже сохранена.'; exit 0; }
@@ -319,6 +325,92 @@ doh_defer() {
     printf '%s\n' "$(( $(date +%s) + 300 ))" > "$OWS_DOH_RUNTIME/retry-$1"
 }
 
+doh_dns_idle() {
+    local package delta
+    for package in dhcp https-dns-proxy; do
+        [ -z "$(uci -q changes "$package")" ] || return 1
+        for delta in /var/run/rpcd/uci-*/"$package"; do [ ! -s "$delta" ] || return 1; done
+    done
+}
+
+doh_plain_supported() {
+    uci -q get 'dhcp.@dnsmasq[0]' >/dev/null && ! uci -q get 'dhcp.@dnsmasq[1]' >/dev/null &&
+        ! uci -q get 'https-dns-proxy.@https-dns-proxy[1]' >/dev/null &&
+        [ "$(uci -q get https-dns-proxy.config.dnsmasq_config_update)" = '*' ]
+}
+
+doh_dns_mode() {
+    if doh_plain_active; then
+        if [ -f "$OWS_DOH_RUNTIME/plain-ok" ] && ! doh_dnsmasq_uses_local; then echo ordinary
+        else echo unavailable; fi
+    elif [ -f "$OWS_DOH_RUNTIME/local-unavailable" ] || grep -q '^2 ' "$OWS_DOH_RUNTIME/counters" 2>/dev/null; then echo unavailable
+    else echo encrypted; fi
+}
+
+doh_set_plain() {
+    doh_owned && doh_guard_intact && doh_dns_idle || return 1
+    case "$1" in
+        on)
+            doh_plain_supported || { echo 'Резерв доступен для одного dnsmasq под управлением HTTPS DNS Proxy.'; return 1; }
+            touch "$OWS_DOH_LIVE/plain-allowed" ;;
+        off)
+            if doh_plain_active; then
+                if ! doh_start_proxy || ! doh_dnsmasq_uses_local; then
+                    doh_use_plain || :
+                    echo 'Не удалось вернуть DoH. Настройка обычного DNS сохранена.'
+                    return 1
+                fi
+                rm -f "$OWS_DOH_LIVE/plain-active" "$OWS_DOH_RUNTIME/plain-ok" || return 1
+            fi
+            rm -f "$OWS_DOH_LIVE/plain-allowed" ;;
+        *) return 1 ;;
+    esac
+}
+
+doh_ensure_dnsmasq() {
+    local services
+    if doh_fresh 53; then return 0; fi
+    doh_dns_idle && services=$(ubus -S -t 2 call service list '{"name":"dnsmasq"}') || return 1
+    printf '%s\n' "$services" | jq -e 'type == "object" and all(.dnsmasq.instances[]?; .running != true)' >/dev/null || return 1
+    timeout 20 "$OWS_DOH_DNSMASQ_INIT" start 9>&- >/dev/null 2>&1 && doh_fresh 53
+}
+
+doh_use_plain() {
+    doh_plain_allowed && doh_plain_supported && doh_dns_idle || return 1
+    if ! doh_plain_active; then
+        doh_dnsmasq_uses_local && touch "$OWS_DOH_LIVE/plain-active" || return 1
+    fi
+    rm -f "$OWS_DOH_RUNTIME/plain-ok" || return 1
+    if doh_proxy_running || doh_dnsmasq_uses_local; then
+        timeout 25 "$OWS_DOH_INIT" stop 9>&- >/dev/null 2>&1 || return 1
+    fi
+    ! doh_dnsmasq_uses_local && doh_ensure_dnsmasq && touch "$OWS_DOH_RUNTIME/plain-ok"
+}
+
+doh_restore_encrypted() (
+    local policy=$1 id url boot tab result
+    doh_dns_idle || exit 1
+    tab=$(printf '\t')
+    while IFS="$tab" read -r id url boot; do
+        doh_candidate_ready "$id" && doh_probe_id "$policy" "$id" || continue
+        result=0
+        doh_switch "$policy" "$id" || result=$?
+        [ "$result" != 3 ] || exit 3
+        if [ "$result" = 0 ] && doh_dnsmasq_uses_local; then
+            rm -f "$OWS_DOH_LIVE/plain-active" "$OWS_DOH_RUNTIME/plain-ok" "$OWS_DOH_RUNTIME/counters" \
+                "$OWS_DOH_RUNTIME/local-unavailable" || exit 1
+            echo 'Зашифрованный DNS восстановлен.'
+            exit 0
+        fi
+        doh_defer "$id" || exit 1
+        # A failed switch can reactivate the previous DoH configuration.
+        doh_use_plain || break
+    done < "$policy"
+    if doh_use_plain; then echo 'DoH недоступен. Работает обычный DNS.'
+    else echo 'DoH и резервный обычный DNS не прошли проверку.'; fi
+    exit 1
+)
+
 doh_run_policy() (
     local policy=$1 current=$2 primary id fails=0 successes=0 tab url boot result
     [ ! -r "$OWS_DOH_RUNTIME/counters" ] || read -r fails successes < "$OWS_DOH_RUNTIME/counters"
@@ -326,6 +418,12 @@ doh_run_policy() (
     primary=$(cut -f 1 "$policy" | head -n 1)
     if doh_fresh 5053; then
         fails=0
+        if ! doh_dnsmasq_uses_local || ! doh_ensure_dnsmasq; then
+            : > "$OWS_DOH_RUNTIME/local-unavailable"
+            printf '0 0\n' > "$OWS_DOH_RUNTIME/counters"
+            echo 'DoH отвечает, но локальный DNS на порту 53 не прошёл проверку.'
+            exit 1
+        fi
         if [ "$current" != "$primary" ] && doh_candidate_ready "$primary" && doh_probe_id "$policy" "$primary"; then
             successes=$((successes+1))
             if [ "$successes" -ge 2 ]; then
@@ -349,10 +447,14 @@ doh_run_policy() (
                 if [ "$result" = 0 ]; then fails=0; break; fi
                 doh_defer "$id" || exit 1
             done < "$policy"
-            [ "$fails" = 0 ] || echo 'Запасные DoH не отвечают. Обычный DNS для клиентов выключен.'
         fi
     fi
-    printf '%s %s\n' "$fails" "$successes" > "$OWS_DOH_RUNTIME/counters"
+    rm -f "$OWS_DOH_RUNTIME/local-unavailable" || exit 1
+    printf '%s %s\n' "$fails" "$successes" > "$OWS_DOH_RUNTIME/counters" || exit 1
+    [ "$fails" -ge 2 ] || exit 0
+    if doh_use_plain; then echo 'Все провайдеры DoH недоступны. Работает обычный DNS.'
+    else echo 'Все провайдеры DoH недоступны. Резервный DNS не включён или не ответил.'; fi
+    exit 1
 )
 
 doh_watch() (
@@ -363,10 +465,11 @@ doh_watch() (
     [ ! -e "$OWS_DOH_LIVE/switch.pending" ] || exit 3
     current=$(doh_current_id "$policy") || { echo 'Активный провайдер вне импортированной цепочки.'; exit 1; }
     /etc/init.d/https-dns-proxy enabled >/dev/null 2>&1 || exit 0
+    mkdir -p "$OWS_DOH_RUNTIME" || exit 1
+    if doh_plain_active; then doh_restore_encrypted "$policy"; exit $?; fi
     if ! ubus -S call service list '{"name":"https-dns-proxy"}' | jsonfilter -e '@["https-dns-proxy"].instances.*.running' | grep -Fxq true; then
         doh_start_proxy || :
     fi
-    mkdir -p "$OWS_DOH_RUNTIME" || exit 1
     doh_run_policy "$policy" "$current"
 )
 
@@ -496,6 +599,7 @@ doh_takeover() (
 
 doh_test_switch() (
     local policy="$OWS_DOH_LIVE/providers" current target primary id result=0
+    if doh_plain_active; then echo 'Сначала восстановите DoH или отключите обычный DNS.'; exit 1; fi
     doh_owned && doh_guard_intact || exit 1
     current=$(doh_current_id "$policy") || exit 1
     primary=$(cut -f 1 "$policy" | head -n 1)

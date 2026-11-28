@@ -82,6 +82,9 @@ ows_vpn() (
         refresh_live_subscription) command=refresh-live-subscription ;;
         preview_draft) command=preview-draft:$target ;;
         apply_draft) command=apply-draft:$target ;;
+        fallback_on) command=fallback:on ;;
+        fallback_off) command=fallback:off ;;
+        fallback_restore) command=fallback:restore ;;
         *) command='' ;;
     esac
     json_init

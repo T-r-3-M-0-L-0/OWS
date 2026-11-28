@@ -5,7 +5,8 @@ job_resources() {
         dns:check|dns:check:*|doh:check|steer:list-preview:small:*) echo dns ;;
         netshift:diag) echo firewall ;;
         tg-ws-proxy:check|tg-ws-proxy:start|tg-ws-proxy:stop|tg-ws-proxy:restart) echo telegram ;;
-        doh:watch|doh:test-switch|doh:configure:*|doh:initialize:*|doh:auto:*|steer:probe:*) echo dns firewall ;;
+        doh:watch|doh:test-switch|doh:configure:*|doh:initialize:*|doh:auto:*|doh:fallback:*|\
+        steer:probe:*|steer:watch|steer:fallback:*) echo dns firewall ;;
         *) echo dns firewall telegram ;;
     esac
 }

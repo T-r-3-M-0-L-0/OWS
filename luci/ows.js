@@ -7,10 +7,7 @@
 'require ui';
 'require view.ows-templates as templates';
 'require view.ows-zapret as zapret';
-'require view.ows-zapret-tools as zapretTools';
-'require view.ows-zapret-tactics as zapretTactics';
-'require view.ows-dns as dns';
-'require view.ows-doh as doh';
+'require view.ows-ui as owsUI';
 'require view.ows-domain-search as domainSearch';
 'require view.ows-legacy-cleanup as legacyCleanup';
 'require view.ows-service-status as serviceStatus';
@@ -134,10 +131,12 @@ function statusLabel(result, template) {
 function createTabs(name, tabs, initial, onChange) {
     var links = [];
     var panels = [];
+    var visible = tabs.map(function(tab) { return tab.visible !== false; });
     var active = -1;
     var menu = E('ul', { class: 'cbi-tabmenu ows-tabmenu', role: 'tablist', 'aria-label': name });
 
     function select(index, focus) {
+        if (!visible[index]) return;
         if (index === active) {
             if (focus) links[index].focus();
             return;
@@ -164,12 +163,13 @@ function createTabs(name, tabs, initial, onChange) {
             select(index, false);
         });
         link.addEventListener('keydown', function(event) {
-            var next;
+            var next, choices = visible.map(function(show, i) { return show ? i : -1; }).filter(function(i) { return i >= 0; });
+            var position = choices.indexOf(index);
             switch (event.key) {
-            case 'ArrowRight': next = (index + 1) % tabs.length; break;
-            case 'ArrowLeft': next = (index + tabs.length - 1) % tabs.length; break;
-            case 'Home': next = 0; break;
-            case 'End': next = tabs.length - 1; break;
+            case 'ArrowRight': next = choices[(position + 1) % choices.length]; break;
+            case 'ArrowLeft': next = choices[(position + choices.length - 1) % choices.length]; break;
+            case 'Home': next = choices[0]; break;
+            case 'End': next = choices[choices.length - 1]; break;
             case ' ': next = index; break;
             default: return;
             }
@@ -178,20 +178,29 @@ function createTabs(name, tabs, initial, onChange) {
         });
         links.push(link);
         panels.push(panel);
-        menu.appendChild(E('li', { role: 'presentation' }, link));
+        var item = E('li', { role: 'presentation' }, link);
+        item.hidden = !visible[index];
+        menu.appendChild(item);
     });
 
     var content = E('div', {}, [menu].concat(panels));
     var start = typeof initial === 'string' ? tabs.findIndex(function(tab) { return tab.id === initial; }) : initial;
-    select(start > 0 ? start : 0, false);
+    select(visible[start] ? start : visible.indexOf(true), false);
     return {
         content: content,
         select: function(index) { select(index, true); },
         selectId: function(id) {
             var index = tabs.findIndex(function(tab) { return tab.id === id; });
-            if (index < 0) return false;
+            if (index < 0 || !visible[index]) return false;
             select(index, true);
             return true;
+        },
+        setVisible: function(id, show) {
+            var index = tabs.findIndex(function(tab) { return tab.id === id; });
+            if (index < 0 || visible[index] === show) return;
+            visible[index] = show;
+            links[index].parentNode.hidden = !show;
+            if (!show && index === active) select(visible.indexOf(true), false);
         },
         activate: function() { if (tabs[active].activate) tabs[active].activate(); },
         selectedId: function() { return tabs[active].id; }
@@ -420,9 +429,10 @@ return view.extend({
 
         var classicModule = zapret.init('zapret', followJob);
         var zapret2Module = zapret.init('zapret2', followJob, {
-            revision: zapretTools.profileRevision,
+            revision: zapret.profileRevision,
             onNativeLoad: function() { refreshZapret2Tab('zapret2-presets'); },
-            onApplied: onZapretConfigApplied
+            onApplied: onZapretConfigApplied,
+            onState: function(data) { showZapret2Constructor(data.installed); }
         });
         var classicHashes = {
             'zapret-service': '#ows-tab-zapret-service-panel',
@@ -450,6 +460,7 @@ return view.extend({
         var classicStart = Object.keys(classicHashes).find(function(id) { return classicHashes[id] === window.location.hash; });
         var zapret2Start = presetAliases.includes(window.location.hash) ? 'zapret2-presets' :
             Object.keys(zapret2Hashes).find(function(id) { return zapret2Hashes[id] === window.location.hash; });
+        var openPresetAfterStatus = zapret2Start === 'zapret2-presets';
         var versionStart = zapret2Start || window.location.hash === '#ows-tab-zapret2-panel' ? 'zapret2' : 'zapret';
         var moduleHashes = Object.values(classicHashes).concat(Object.values(zapret2Hashes), presetAliases,
             ['#ows-tab-zapret-group-panel', '#ows-tab-zapret-panel', '#ows-tab-zapret2-panel']);
@@ -466,7 +477,7 @@ return view.extend({
         function onZapretConfigApplied() {
             refreshZapret2Tab('zapret2-native');
             if (isZapretVersion('zapret2') && zapret2.selectedId() === 'zapret2-presets' &&
-                presetTab.selectedSection() === 'zapret2-tactics') tacticsTab.activate();
+                loadedPreset && loadedPreset.selectedSection() === 'zapret2-tactics') tacticsTab.activate();
         }
 
         function rememberModuleTab(id, section) {
@@ -475,7 +486,7 @@ return view.extend({
             if (id === 'zapret-group') {
                 if (zapretVersions.selectedId() === 'zapret2') {
                     var tab = zapret2.selectedId();
-                    hash = (tab === 'zapret2-presets' && presetSectionHashes[section || presetTab.selectedSection()]) || zapret2Hashes[tab];
+                    hash = (tab === 'zapret2-presets' && presetSectionHashes[section || (loadedPreset && loadedPreset.selectedSection()) || presetSection]) || zapret2Hashes[tab];
                 } else {
                     hash = classicHashes[classicTabs.selectedId()];
                 }
@@ -493,20 +504,34 @@ return view.extend({
         ].map(function(tab) { return templates.panel(tab); }), classicStart, function() {
             if (isZapretVersion('zapret')) rememberModuleTab('zapret-group');
         });
-        var tacticsTab = templates.panel(zapretTactics.tab(followJob, {
-            showResources:showResources,
-            panel:function(tab) { return templates.panel(tab); },
-            onApplied:function() { refreshZapret2Tab('zapret2-native'); }
-        }));
-        var presetTab = templates.panel(zapretTools.presets(followJob,
-            {content:zapret2Module.constructor, activate:zapret2Module.loadConstructor},
-            onZapretConfigApplied, {
-                panel:function(tab) { return templates.panel(tab); }, createTabs:createTabs, section:presetSection,tactics:tacticsTab,
-                onSectionChange:function(id) {
-                    if (isZapretVersion('zapret2') && zapret2.selectedId() === 'zapret2-presets')
-                        rememberModuleTab('zapret-group', id);
-                }
-            }));
+        var tacticsTab, loadedPreset;
+        var presetTab = owsUI.deferredTab('zapret2-presets', _('Конструктор пресетов'), function() {
+            return Promise.all([L.require('view.ows-zapret-tools'), L.require('view.ows-zapret-tactics')]).then(function(views) {
+                tacticsTab = templates.panel(views[1].tab(followJob, {
+                    showResources:showResources,
+                    panel:function(tab) { return templates.panel(tab); },
+                    onApplied:function() { refreshZapret2Tab('zapret2-native'); }
+                }));
+                loadedPreset = views[0].presets(followJob,
+                    {content:zapret2Module.constructor, activate:zapret2Module.loadConstructor}, onZapretConfigApplied, {
+                        panel:function(tab) { return templates.panel(tab); }, createTabs:createTabs, section:presetSection,tactics:tacticsTab,
+                        onSectionChange:function(id) {
+                            if (isZapretVersion('zapret2') && zapret2.selectedId() === 'zapret2-presets')
+                                rememberModuleTab('zapret-group', id);
+                        }
+                    });
+                return loadedPreset;
+            });
+        });
+        presetTab.visible = false;
+        presetTab = templates.panel(presetTab);
+        function showZapret2Constructor(available) {
+            zapret2.setVisible('zapret2-presets', available === true);
+            if (available && openPresetAfterStatus && isZapretVersion('zapret2')) {
+                openPresetAfterStatus = false;
+                zapret2.selectId('zapret2-presets');
+            }
+        }
         var zapret2 = createTabs(_('Разделы Zapret2'), [
             { id: 'zapret2-service', label: _('Служба и пакеты'), content: zapret2Module.status },
             zapret2Module.native
@@ -602,6 +627,7 @@ return view.extend({
         var selectedGroup = Object.create(null);
 
         function renderModules(entries, vpnDrivers, installed) {
+            showZapret2Constructor(installed.zapret2);
             moduleTemplates = Object.create(null);
             domainTargets = Object.create(null);
             domainTargets.zapret2 = function() {
@@ -647,11 +673,15 @@ return view.extend({
                 groups[id] = { index: tabs.length, tabs: children, open: open };
                 tabs.push({ id: id, label: group.label, content: content, activate: open });
             });
-            tabs.push(templates.panel(dns.tab(followJob)));
+            tabs.push(templates.panel(owsUI.deferredTab('dns', _('DNS'), function() {
+                return L.require('view.ows-dns').then(function(dns) { return dns.tab(followJob); });
+            })));
             rows.push({id:'doh',name:'DoH',description:_('DNS через HTTPS'),tab:tabs.length,
                 installed:installed.doh,installable:installed.doh === false,
                 installConfirmation:_('Установить HTTPS DNS Proxy из репозитория OpenWrt? Пакет может запустить службу и изменить DNS.')});
-            tabs.push(templates.panel(doh.tab(followJob)));
+            tabs.push(templates.panel(owsUI.deferredTab('doh', 'DoH', function() {
+                return L.require('view.ows-doh').then(function(doh) { return doh.tab(followJob); });
+            })));
             entries.forEach(function(entry) {
                 if (entry.id === 'zapret' || entry.id === 'zapret2') return;
                 if (entry.kind !== 'adapter') {

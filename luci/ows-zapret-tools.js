@@ -85,10 +85,6 @@ function toolAction(followJob, action) {
 }
 
 return baseclass.extend({
-    profileRevision: function() {
-        return presetList().then(assertResult).then(function(data) { return data.revision; });
-    },
-
     presets: function(followJob, constructor, onApplied, options) {
         options = options || {};
         var names = E('select', {class:'cbi-input-select'});

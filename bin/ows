@@ -84,7 +84,7 @@ enqueue() (
         doh)
             [ "$#" = 1 ] || fail 'Usage: ows doh ACTION'
             case "$1" in
-                install|check|prepare|verify|takeover|test-switch|watch|auto:on|auto:off) ;;
+                install|check|prepare|verify|takeover|test-switch|watch|auto:on|auto:off|fallback:on|fallback:off) ;;
                 initialize:*) . "$LIB/doh-live.sh"; doh_policy_rows "${1#initialize:}" >/dev/null || fail 'Invalid DoH chain' ;;
                 configure:*) . "$LIB/doh-live.sh"; doh_configure_valid "${1#configure:}" || fail 'Invalid DoH chain' ;;
                 *) fail 'Unknown DoH action' ;;
@@ -119,11 +119,11 @@ enqueue() (
     prepare
     exec 8>"$RUN/submit.lock"
     flock -x 8
-    if [ "$kind" = doh ] && [ "$1" = watch ]; then
+    if { [ "$kind" = doh ] || [ "$kind" = steer ]; } && [ "$1" = watch ]; then
         for ticket in "$QUEUE"/*; do
             [ -f "$ticket" ] || continue
             id=${ticket##*/}
-            if [ "$(cat "$JOBS/$id/kind" 2>/dev/null)" = doh ] && [ "$(cat "$JOBS/$id/action" 2>/dev/null)" = watch ]; then
+            if [ "$(cat "$JOBS/$id/kind" 2>/dev/null)" = "$kind" ] && [ "$(cat "$JOBS/$id/action" 2>/dev/null)" = watch ]; then
                 printf '%s\n' "$id"
                 exit 0
             fi
@@ -275,6 +275,7 @@ process_module() {
                         takeover) doh_takeover ;;
                         initialize:*) doh_initialize "${action#initialize:}" ;;
                         auto:*) doh_set_auto "${action#auto:}" ;;
+                        fallback:*) doh_set_plain "${action#fallback:}" ;;
                         configure:*) doh_configure "${action#configure:}" ;;
                         watch) doh_watch ;;
                         test-switch) doh_test_switch ;;
@@ -563,6 +564,9 @@ worker() {
         fi
         if [ -f /etc/ows/doh-live/auto ] && [ "$(date +%s)" -ge "${next_doh_tick:-0}" ]; then
             enqueue doh watch >/dev/null && next_doh_tick=$(($(date +%s) + 120))
+        fi
+        if [ -f "$STATE/steer-live/direct-allowed" ] && [ "$(date +%s)" -ge "${next_steer_tick:-0}" ]; then
+            enqueue steer watch >/dev/null && next_steer_tick=$(($(date +%s) + 60))
         fi
         if command -v adblock_live_ensure >/dev/null && [ "$(date +%s)" -ge "${next_adblock_tick:-0}" ] &&
             run_maintenance adblock_live_ensure; then

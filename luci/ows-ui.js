@@ -11,6 +11,31 @@ function checked(data) {
 
 return baseclass.extend({
     checked: checked,
+    deferredTab: function(id, label, build) {
+        var content = E('div');
+        var tab, pending;
+
+        function invoke(method, value) {
+            if (!tab && !pending) {
+                content.textContent = _('Загрузка…');
+                pending = Promise.resolve().then(build).then(function(result) {
+                    tab = result;
+                    content.replaceChildren(E('div', {}, tab.content));
+                    return tab;
+                }).catch(function() {
+                    content.textContent = _('Не удалось загрузить вкладку. Откройте её ещё раз.');
+                    return null;
+                }).finally(function() { pending = null; });
+            }
+            return (tab ? Promise.resolve(tab) : pending).then(function(result) {
+                if (result && result[method]) return result[method](value);
+            });
+        }
+
+        return {id:id, label:label, content:content,
+            activate:function() { return invoke('activate'); },
+            openSection:function(value) { return invoke('openSection', value); }};
+    },
     field: function(label, control) {
         return E('label', {class:'ows-field'}, [E('span', {}, label), control]);
     },

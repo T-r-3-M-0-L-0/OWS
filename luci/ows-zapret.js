@@ -9,6 +9,7 @@ var field = owsUI.field, button = owsUI.button;
 var info = rpc.declare({object:'ows', method:'zapret_module_info', params:['id']});
 var action = rpc.declare({object:'ows', method:'zapret_module_action', params:['id','action']});
 var constructorInfo = rpc.declare({object:'ows', method:'zapret_constructor', params:['topic']});
+var presetList = rpc.declare({object:'ows',method:'zapret_presets'});
 var jobOutput = rpc.declare({object:'ows', method:'job_output', params:['job']});
 
 function actions(nodes) { return E('div', {class:'ows-actions'}, nodes); }
@@ -26,6 +27,9 @@ function rows(headings, items) {
 }
 
 return baseclass.extend({
+    profileRevision: function() {
+        return presetList().then(owsUI.checked).then(function(data) { return data.revision; });
+    },
     init: function(id, followJob, profiles) {
         profiles = profiles || {};
         var panel = E('div');
@@ -96,6 +100,7 @@ return baseclass.extend({
         function refresh() {
             return info(id).then(function(data) {
                 if (!data || data.error || data.id !== id) throw new Error();
+                if (profiles.onState) profiles.onState(data);
                 var installAction = data.downloaded ? 'install' : 'install-latest';
                 var packageSupported = !data.reference_arch || data.reference_arch === data.arch;
                 panel.replaceChildren(
